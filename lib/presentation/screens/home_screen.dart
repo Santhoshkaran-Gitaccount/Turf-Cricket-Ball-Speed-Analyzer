@@ -1,0 +1,42 @@
+import 'package:flutter/material.dart';
+
+import 'session_setup_screen.dart';
+
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Same logo as the launcher icon and splash screen.
+              Image.asset('assets/icon/logo.png', width: 160, height: 160),
+              const SizedBox(height: 16),
+              Text('Ball Speed Analyzer', style: textTheme.headlineMedium),
+              const SizedBox(height: 8),
+              Text(
+                'Measure bowling speed with your phone camera',
+                style: textTheme.bodyMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const SessionSetupScreen()),
+                ),
+                icon: const Icon(Icons.videocam),
+                label: const Text('Start Session'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
