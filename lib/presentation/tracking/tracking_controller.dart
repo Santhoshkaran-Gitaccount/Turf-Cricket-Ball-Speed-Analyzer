@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/detection/detection_worker.dart';
@@ -188,6 +189,10 @@ class TrackingController extends Notifier<TrackingState> {
     switch (event) {
       case ReleaseDetected():
         state = state.copyWith(ballInFlight: true);
+        // Told by sound too, so the bowler end knows the ball was picked up
+        // without looking at the screen. No vibration: it would shake the camera.
+        _showNotice('Ball detected');
+        unawaited(SystemSound.play(SystemSoundType.click));
       case BallTravelling():
         break;
       case DeliveryCompleted(:final measurement):

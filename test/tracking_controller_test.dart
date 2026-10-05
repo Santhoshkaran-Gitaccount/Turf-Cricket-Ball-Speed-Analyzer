@@ -74,12 +74,17 @@ void main() {
   }
 
   test('a detected delivery waits for save, then is stored and counted', () async {
+    final notices = <String>[];
+    container.listen(trackingControllerProvider(session), (_, next) {
+      if (next.notice case final notice?) notices.add(notice);
+    });
     await controller().start();
     expect(state().status, TrackingStatus.tracking);
 
     await bowl();
     await waitFor(() => state().pending != null);
     expect(state().pending, isNotNull);
+    expect(notices, contains('Ball detected'), reason: 'the release is announced');
     expect(session.totalDeliveries, 0, reason: 'not counted until saved');
 
     controller().savePending();
