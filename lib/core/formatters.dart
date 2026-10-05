@@ -4,6 +4,9 @@ library;
 /// Speeds are shown rounded to the nearest whole km/h.
 String formatSpeed(num? kmh) => kmh == null ? '–' : '${kmh.round()} km/h';
 
+/// Release-to-finish time, to the hundredth of a second, e.g. "0.56 s".
+String formatTravelTime(Duration d) => '${(d.inMicroseconds / 1e6).toStringAsFixed(2)} s';
+
 String formatPitchLength(double meters) {
   final text = meters == meters.roundToDouble() ? meters.toStringAsFixed(0) : meters.toStringAsFixed(2);
   return meters == 20.12 ? '$text m (22 yards)' : '$text m';

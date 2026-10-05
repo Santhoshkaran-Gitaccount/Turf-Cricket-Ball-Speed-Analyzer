@@ -32,7 +32,8 @@ class SessionSummaryScreen extends StatelessWidget {
             Text('Session Details', style: textTheme.titleMedium),
             _row('Session Name', session.name),
             _row('Date', formatDate(session.startTime)),
-            _row('Duration', formatDuration(session.duration)),
+            // A session closed without End (e.g. the app was killed) has no real duration.
+            _row('Duration', session.endTime == null ? 'Not ended' : formatDuration(session.duration)),
             _row('Pitch Length', formatPitchLength(session.pitchLengthMeters)),
             _row('Ball Type', session.ballType.label),
             const Divider(height: 24),
@@ -65,7 +66,11 @@ class SessionSummaryScreen extends StatelessWidget {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Text(label),
-          Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(width: 16),
+          // Long values (a long session name) wrap instead of overflowing.
+          Flexible(
+            child: Text(value, textAlign: TextAlign.end, style: const TextStyle(fontWeight: FontWeight.w600)),
+          ),
         ],
       ),
     );

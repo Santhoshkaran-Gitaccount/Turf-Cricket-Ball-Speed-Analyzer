@@ -135,7 +135,10 @@ class PitchGeometry {
 
   bool isBatsmanZone(double y) => y >= batsmanZoneTopY;
 
-  bool reachedStumps(double y) => y >= nearY - 0.05 * scale;
+  /// The line a ball crosses on reaching the batting stumps.
+  double get stumpsLineY => nearY - 0.05 * scale;
+
+  bool reachedStumps(double y) => y >= stumpsLineY;
 
   /// Outline of the batting stumps, as (left, top, right, bottom).
   (double, double, double, double) get battingStumps =>

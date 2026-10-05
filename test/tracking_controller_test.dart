@@ -61,7 +61,9 @@ void main() {
       await frames([const []]);
     }
     await frames([for (var i = 0; i < 10; i++) const []]);
-    await frames([for (var i = 0; i <= 40; i++) [(0.5, 0.22 + 0.40 * i / 40)]]);
+    // About 0.65 s down the pitch (~110 km/h). Fewer frames put the ball near
+    // the 165 km/h limit, where a millisecond of machine timing decides validity.
+    await frames([for (var i = 0; i <= 60; i++) [(0.5, 0.22 + 0.40 * i / 60)]]);
     await frames([for (var i = 0; i < 30; i++) const []]);
   }
 

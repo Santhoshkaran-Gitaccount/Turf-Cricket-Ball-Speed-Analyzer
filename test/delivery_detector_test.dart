@@ -29,6 +29,38 @@ void main() {
       expect(DeliveryMeasurement.calculateSpeedKmh(20, const Duration(microseconds: 505000)), 143);
     });
 
+    test('the phone\'s frame timing wobble does not change the speed', () {
+      int speedWith({required int jitterMicros}) {
+        final h = DetectorHarness(jitterMicros: jitterMicros);
+        addTearDown(h.dispose);
+        h.empty(5);
+        h.ball(0.22, 0.93, 60);
+        h.empty(5);
+        return h.deliveries.single.speedKmh;
+      }
+
+      expect(speedWith(jitterMicros: 4000), closeTo(speedWith(jitterMicros: 0), 1));
+    });
+
+    test('the speed is the same at 30 and 120 FPS', () {
+      int speedAt(int fps) {
+        final h = DetectorHarness(fps: fps);
+        addTearDown(h.dispose);
+        h.empty(5);
+        // 0.6 s from release to past the stumps, whatever the frame rate.
+        h.ball(0.22, 0.93, (0.6 * fps).round());
+        h.empty(5);
+        return h.deliveries.single.speedKmh;
+      }
+
+      expect(speedAt(30), closeTo(speedAt(120), 1));
+    });
+
+    test('estimated release speed is a little above the measured average', () {
+      const measured = DeliveryMeasurement(path: [], end: DeliveryEnd.stumps, speedKmh: 100);
+      expect(measured.estimatedReleaseKmh, 112);
+    });
+
     test('session stats show whole km/h', () {
       expect(formatSpeed(131.6), '132 km/h');
       expect(formatSpeed(null), '–');
@@ -234,6 +266,26 @@ void main() {
       h.empty(20);
 
       expect(h.deliveries, hasLength(1));
+    });
+
+    test('a tennis ball is still seen in dim light', () {
+      // Indoors or at dusk the turf is darker and so is the ball.
+      final h = _harness(ballLuma: background - 30 + 24);
+      h.empty(5, brightness: -30);
+      h.ball(0.22, 0.62, 60, baseBrightness: -30);
+      h.empty(20, brightness: -30);
+
+      expect(h.deliveries, hasLength(1));
+    });
+
+    test('a ball is still seen through sensor grain or shimmering grass', () {
+      final h = _harness();
+      h.empty(5, noise: 20);
+      h.ball(0.22, 0.62, 60, noise: 20);
+      h.empty(20, noise: 20);
+
+      expect(h.deliveries, hasLength(1));
+      expect(h.events.whereType<CameraSteadinessChanged>(), isEmpty, reason: 'grain is not camera movement');
     });
 
     test('tennis ball setting ignores the same faint movement', () {

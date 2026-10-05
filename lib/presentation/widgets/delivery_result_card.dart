@@ -51,13 +51,33 @@ class DeliveryResultCard extends StatelessWidget {
                       formatSpeed(delivery.speedKmh),
                       style: const TextStyle(color: Colors.white, fontSize: 48, fontWeight: FontWeight.w800),
                     ),
-                    Text(delivery.end.label, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                    const Text('Average over the pitch', style: TextStyle(color: Colors.white70, fontSize: 12)),
+                    const SizedBox(height: 8),
+                    // For comparing with a speed gun, which shows the speed at release.
+                    Text(
+                      'Release ≈ ${formatSpeed(delivery.estimatedReleaseKmh)} (est.)',
+                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600),
+                    ),
+                    Text(
+                      '${formatTravelTime(delivery.travelTime)}  •  ${delivery.end.label}',
+                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
                     const SizedBox(height: 12),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                       children: [
-                        Stat(label: 'Fastest Ball', value: formatSpeed(stats.fastest)),
-                        Stat(label: 'Average Speed', value: formatSpeed(stats.average)),
+                        Flexible(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Stat(label: 'Fastest Ball', value: formatSpeed(stats.fastest)),
+                          ),
+                        ),
+                        Flexible(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Stat(label: 'Average Speed', value: formatSpeed(stats.average)),
+                          ),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 16),

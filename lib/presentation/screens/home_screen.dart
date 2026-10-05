@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'history_screen.dart';
 import 'session_setup_screen.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -32,6 +33,14 @@ class HomeScreen extends StatelessWidget {
                 ),
                 icon: const Icon(Icons.videocam),
                 label: const Text('Start Session'),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton.icon(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const HistoryScreen()),
+                ),
+                icon: const Icon(Icons.history),
+                label: const Text('History'),
               ),
             ],
           ),

@@ -322,7 +322,7 @@ class DeliveryTracker {
 
     // Duration is checked before detection quality: it is measured directly,
     // and a very slow ball also moves too little per frame to be seen often.
-    final travelTime = Duration(microseconds: completedAt - track.points.first.timeMicros);
+    final travelTime = Duration(microseconds: _travelMicros(track.points, end));
     if (travelTime.inMicroseconds < _minTravelMicros || travelTime.inMicroseconds > _maxTravelMicros) {
       _invalid(InvalidReason.durationOutOfRange, completedAt);
       return;
@@ -348,8 +348,56 @@ class DeliveryTracker {
     _candidates.clear();
     _cooldownUntil = completedAt + _cooldownAfterDeliveryMicros;
     onEvent(DeliveryCompleted(
-      DeliveryMeasurement(path: List.unmodifiable(track.points), end: end, speedKmh: speedKmh),
+      DeliveryMeasurement(
+        path: List.unmodifiable(track.points),
+        end: end,
+        speedKmh: speedKmh,
+        travelTime: travelTime,
+      ),
     ));
+  }
+
+  /// Release-to-finish time in microseconds.
+  ///
+  /// Each frame's time is when the phone handed it over, which wobbles by a
+  /// few milliseconds; a smooth fit of time against position down the screen
+  /// through every tracked point averages that out. A ball that reached the
+  /// stumps is timed where the fit crosses the stumps line, between frames,
+  /// rather than at the first frame after it.
+  int _travelMicros(List<TrackPoint> points, DeliveryEnd end) {
+    final first = points.first;
+    final last = points.last;
+    final raw = last.timeMicros - first.timeMicros;
+    final span = last.y - first.y;
+    if (points.length < 5 || span <= 0) return raw;
+
+    // Normal equations for t = c0 + c1·u + c2·u², with u the position scaled to 0–1.
+    final m = List.generate(3, (_) => List.filled(3, 0.0));
+    final v = List.filled(3, 0.0);
+    for (final p in points) {
+      final u = (p.y - first.y) / span;
+      final powers = [1.0, u, u * u];
+      final t = (p.timeMicros - first.timeMicros).toDouble();
+      for (var r = 0; r < 3; r++) {
+        for (var c = 0; c < 3; c++) {
+          m[r][c] += powers[r] * powers[c];
+        }
+        v[r] += powers[r] * t;
+      }
+    }
+    final c = _solve3(m, v);
+    if (c == null) return raw;
+    double timeAt(double y) {
+      final u = (y - first.y) / span;
+      return c[0] + c[1] * u + c[2] * u * u;
+    }
+
+    final endY = end == DeliveryEnd.stumps ? geometry.stumpsLineY : last.y;
+    final fitted = timeAt(endY) - timeAt(first.y);
+    // The fit only refines the timing; if it disagrees with the frames by
+    // more than a couple of frames, the path is unusual and the frames win.
+    if (fitted <= 0 || (fitted - raw).abs() > 2 * _frameIntervalMicros) return raw;
+    return fitted.round();
   }
 
   void _invalid(InvalidReason reason, int timeMicros) {

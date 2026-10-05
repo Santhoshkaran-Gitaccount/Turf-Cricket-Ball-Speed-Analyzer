@@ -9,17 +9,27 @@ import 'package:turf_cricket_ball_speed_analyzer/domain/entities/tracking.dart';
 
 const background = 60;
 
+final _noiseRandom = Random(11);
+
 /// A grey frame with square "balls" of [ballLuma] centred at normalized positions.
+/// [noise] adds random grain of up to ± that much to every background pixel,
+/// like a camera sensor in low light or sunlit grass.
 Uint8List syntheticPixels({
   int width = 640,
   int height = 360,
   List<(double, double)> balls = const [],
   int ballLuma = 230,
   int brightness = 0,
+  int noise = 0,
   bool flip = false,
 }) {
   final ballSize = (4 * width / 640).round();
   final bytes = Uint8List(width * height)..fillRange(0, width * height, background + brightness);
+  if (noise > 0) {
+    for (var i = 0; i < bytes.length; i++) {
+      bytes[i] = (bytes[i] + _noiseRandom.nextInt(2 * noise + 1) - noise).clamp(0, 255);
+    }
+  }
   for (final (x, y) in balls) {
     var px = (x * width).round();
     var py = (y * height).round();
@@ -90,6 +100,8 @@ class DetectorHarness {
     bool flip = false,
     Set<int> hidden = const {},
     Map<int, int> brightness = const {},
+    int baseBrightness = 0,
+    int noise = 0,
     bool stopAtEnd = false,
     int framesAfter = 0,
   }) {
@@ -100,7 +112,8 @@ class DetectorHarness {
         height: height,
         balls: hidden.contains(i) ? const [] : [(0.5, y)],
         ballLuma: ballLuma,
-        brightness: brightness[i] ?? 0,
+        brightness: brightness[i] ?? baseBrightness,
+        noise: noise,
         flip: flip,
       ));
     }
@@ -114,9 +127,9 @@ class DetectorHarness {
     }
   }
 
-  void empty(int frames, {int brightness = 0}) {
+  void empty(int frames, {int brightness = 0, int noise = 0}) {
     for (var i = 0; i < frames; i++) {
-      frame(syntheticPixels(width: width, height: height, brightness: brightness));
+      frame(syntheticPixels(width: width, height: height, brightness: brightness, noise: noise));
     }
   }
 

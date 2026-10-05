@@ -82,6 +82,13 @@ class TrackingController extends Notifier<TrackingState> {
     );
   }
 
+  /// Forgets the previous frame and any candidate tracks, e.g. after the
+  /// camera's exposure changed, so the brightness jump is not taken for motion.
+  void resetDetection() {
+    if (state.status != TrackingStatus.tracking || state.ballInFlight) return;
+    _worker?.reset();
+  }
+
   /// Hands one camera frame's brightness plane to the detector.
   void processFrame({
     required Uint8List bytes,

@@ -16,6 +16,11 @@ final recordInvalidDeliveryProvider =
     Provider((ref) => RecordInvalidDelivery(ref.watch(sessionRepositoryProvider)));
 final endSessionProvider = Provider((ref) => EndSession(ref.watch(sessionRepositoryProvider)));
 
+/// Every stored session with its deliveries, newest first. Reloaded each time
+/// the history screen opens.
+final sessionHistoryProvider =
+    FutureProvider.autoDispose((ref) => ref.watch(sessionRepositoryProvider).loadSessions());
+
 /// Asset path of the optional TensorFlow Lite ball detection model.
 const ballModelAsset = 'assets/models/ball_detector.tflite';
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -6,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../core/formatters.dart';
+import '../../data/camera_settings_store.dart';
 import '../../domain/detection/view_transform.dart';
 import '../../domain/entities/session.dart';
 import '../tracking/tracking_controller.dart';
@@ -26,15 +29,39 @@ class CameraScreen extends ConsumerStatefulWidget {
 }
 
 class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBindingObserver {
-  /// Tried in order; 30 FPS is the minimum, and higher rates measure speed more precisely.
-  static const _fpsCandidates = [120, 60, 30];
+  /// Camera settings tried in order. Android often accepts a frame rate it
+  /// cannot deliver, so each is measured, and a lower resolution (enough for
+  /// detection, which works on a coarse grid) is tried when 60 FPS is not reached.
+  static const _configs = [
+    (ResolutionPreset.high, 120),
+    (ResolutionPreset.high, 60),
+    (ResolutionPreset.medium, 120),
+    (ResolutionPreset.medium, 60),
+  ];
+
+  /// 60 FPS is the minimum for reliable detection.
+  static const _requiredFps = 60;
 
   /// Minimum for tracking; slightly lower readings are measurement noise.
-  static const _minFps = 28;
+  static const _minFps = 55;
+
+  /// While waiting for a delivery, exposure is unlocked this often so it
+  /// follows the light (sun, clouds, floodlights), then locked again.
+  static const _remeterInterval = Duration(seconds: 8);
+  static const _remeterDuration = Duration(milliseconds: 800);
+
+  /// Time autofocus is given to settle on the far stumps before it is locked.
+  static const _focusSettleTime = Duration(milliseconds: 1500);
 
   CameraController? _camera;
   bool _openingCamera = false;
+  DateTime? _focusSetAt;
   int? _requestedFps;
+  Timer? _remeterTimer;
+
+  /// True while exposure is adjusting; frames are not used meanwhile, since
+  /// the brightness change would look like motion.
+  bool _remetering = false;
   String? _error;
   double _screenAspect = 16 / 9;
 
@@ -61,6 +88,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     WakelockPlus.disable();
+    _remeterTimer?.cancel();
     if (_landscape) SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     _camera?.dispose();
     super.dispose();
@@ -132,40 +160,149 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
         return;
       }
 
-      for (final fps in _fpsCandidates) {
-        final camera = CameraController(
-          back.first,
-          ResolutionPreset.high,
-          fps: fps,
-          enableAudio: false,
-          // Detection only needs the brightness plane, which YUV provides directly.
-          imageFormatGroup: ImageFormatGroup.yuv420,
-        );
+      CameraController create((ResolutionPreset, int) config) => CameraController(
+            back.first,
+            config.$1,
+            fps: config.$2,
+            enableAudio: false,
+            // Detection only needs the brightness plane, which YUV provides directly.
+            imageFormatGroup: ImageFormatGroup.yuv420,
+          );
+
+      final cameraName = back.first.name;
+
+      // The setting measured on an earlier visit opens straight away.
+      if (await CameraSettingsStore.load(cameraName) case (final preset, final fps, final measured)) {
+        final camera = create((preset, fps));
         try {
           await camera.initialize();
           await camera.lockCaptureOrientation(_orientation);
+          if (!mounted) {
+            await _disposeQuietly(camera);
+            return;
+          }
+          setState(() {
+            _camera = camera;
+            _requestedFps = measured.round();
+          });
+          return;
         } on CameraException catch (e) {
-          await camera.dispose();
+          await _disposeQuietly(camera);
+          if (e.code.contains('AccessDenied')) rethrow;
+          // The remembered setting no longer works (e.g. after an update): measure again.
+          await CameraSettingsStore.forget(cameraName);
+        }
+      }
+
+      // First visit: only one camera can be open at a time, so each setting is
+      // measured and closed before the next; the first to reach the minimum is kept open.
+      (ResolutionPreset, int)? bestConfig;
+      var bestFps = 0.0;
+      CameraController? chosen;
+      for (final config in _configs) {
+        final camera = create(config);
+        final double measured;
+        try {
+          await camera.initialize();
+          await camera.lockCaptureOrientation(_orientation);
+          measured = await _measureFps(camera);
+        } on CameraException catch (e) {
+          await _disposeQuietly(camera);
           if (e.code.contains('AccessDenied')) rethrow;
           continue;
         }
         if (!mounted) {
-          await camera.dispose();
+          await _disposeQuietly(camera);
           return;
         }
-        setState(() {
-          _camera = camera;
-          _requestedFps = fps;
-        });
+        if (measured > bestFps) {
+          bestConfig = config;
+          bestFps = measured;
+        }
+        if (measured >= _minFps) {
+          chosen = camera;
+          break;
+        }
+        await _disposeQuietly(camera);
+      }
+      if (bestConfig == null) {
+        setState(() => _error = 'Could not open the camera.');
         return;
       }
-      setState(() => _error = 'This camera does not support ${_fpsCandidates.last} FPS, which is the minimum required.');
+      // None reached the minimum: reopen the fastest. It still works; the screen warns about it.
+      if (chosen == null) {
+        chosen = create(bestConfig);
+        await chosen.initialize();
+        await chosen.lockCaptureOrientation(_orientation);
+      }
+      await CameraSettingsStore.save(cameraName, bestConfig, bestFps);
+      if (!mounted) {
+        await _disposeQuietly(chosen);
+        return;
+      }
+      setState(() {
+        _camera = chosen;
+        _requestedFps = bestFps.round();
+      });
     } on CameraException catch (e) {
       setState(
         () => _error = e.code.contains('AccessDenied')
             ? 'Camera permission is required. Please allow camera access in Settings.'
             : 'Could not open the camera: ${e.description ?? e.code}',
       );
+    }
+  }
+
+  /// Closes a camera that was only opened to measure it. The Android camera
+  /// plugin throws when closing one whose preview was never shown; it is
+  /// closed all the same, so that error is ignored.
+  Future<void> _disposeQuietly(CameraController camera) async {
+    try {
+      await camera.dispose();
+    } on PlatformException {
+      // See above.
+    }
+  }
+
+  /// The frame rate [camera] actually delivers, measured over about a second
+  /// after a short warm-up.
+  Future<double> _measureFps(CameraController camera) async {
+    final clock = Stopwatch()..start();
+    const warmUpMicros = 200000;
+    var frames = 0;
+    int? first;
+    int? last;
+    await camera.startImageStream((_) {
+      final now = clock.elapsedMicroseconds;
+      if (now < warmUpMicros) return;
+      frames++;
+      first ??= now;
+      last = now;
+    });
+    await Future<void>.delayed(const Duration(milliseconds: 1000));
+    await camera.stopImageStream();
+    if (frames < 2) return 0;
+    return (frames - 1) * 1e6 / (last! - first!);
+  }
+
+  /// Lets exposure follow the light for a moment, then locks it again.
+  /// Skipped while a ball is in flight or a result is waiting.
+  Future<void> _remeter() async {
+    final camera = _camera;
+    final tracking = ref.read(trackingControllerProvider(widget.session));
+    if (camera == null || _remetering || tracking.ballInFlight || tracking.pending != null) return;
+    if (tracking.status != TrackingStatus.tracking) return;
+    _remetering = true;
+    try {
+      await camera.setExposureMode(ExposureMode.auto);
+      await Future<void>.delayed(_remeterDuration);
+      await camera.setExposureMode(ExposureMode.locked);
+    } on CameraException {
+      // Exposure locking is unsupported; it then follows the light on its own.
+    } finally {
+      // The first frame after the change is compared with nothing, not with a darker or brighter one.
+      _controller.resetDetection();
+      _remetering = false;
     }
   }
 
@@ -177,6 +314,12 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     if (ref.read(trackingControllerProvider(widget.session)).status != TrackingStatus.tracking) {
       return;
     }
+    // Locking before autofocus has settled on the far stumps would keep the
+    // far end, where the ball is smallest, blurred for the whole session.
+    if (_focusSetAt case final setAt?) {
+      final remaining = _focusSettleTime - DateTime.now().difference(setAt);
+      if (remaining > Duration.zero) await Future<void>.delayed(remaining);
+    }
     // Stop exposure and focus hunting mid-delivery; brightness changes look like motion.
     try {
       await camera.setExposureMode(ExposureMode.locked);
@@ -185,6 +328,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
       // Not every device supports locking; detection still works without it.
     }
     if (!camera.value.isStreamingImages) await camera.startImageStream(_onFrame);
+    _remeterTimer?.cancel();
+    _remeterTimer = Timer.periodic(_remeterInterval, (_) => _remeter());
   }
 
   Future<void> _pauseTracking() async {
@@ -193,6 +338,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
   }
 
   Future<void> _stopStream() async {
+    _remeterTimer?.cancel();
+    _remeterTimer = null;
     final camera = _camera;
     if (camera == null || !camera.value.isStreamingImages) return;
     await camera.stopImageStream();
@@ -206,7 +353,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
 
   void _onFrame(CameraImage image) {
     final camera = _camera;
-    if (camera == null) return;
+    if (camera == null || _remetering) return;
     final luma = image.planes.first;
     _controller.processFrame(
       bytes: luma.bytes,
@@ -241,6 +388,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     try {
       await camera.setFocusPoint(offset);
       await camera.setExposurePoint(offset);
+      _focusSetAt = DateTime.now();
     } on CameraException {
       // Not supported on every device; the camera keeps focusing on its own.
     }
@@ -363,7 +511,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     if (tracking.notice case final message?) return message;
     final fps = tracking.measuredFps;
     if (isTracking && fps != null && fps < _minFps) {
-      return 'Camera running at ${fps.round()} FPS. At least ${_fpsCandidates.last} FPS is needed for accurate speed.';
+      return 'Camera running at ${fps.round()} FPS. At least $_requiredFps FPS is needed for accurate speed.';
     }
     return null;
   }
