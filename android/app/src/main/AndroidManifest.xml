@@ -5,9 +5,9 @@
         android:name="android.hardware.camera"
         android:required="true"/>
     <application
-        android:label="Ball Speed Analyzer"
+        android:label="Cricket Ball Speed Analyzer"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/launcher_icon">
         <activity
             android:name=".MainActivity"
             android:exported="true"

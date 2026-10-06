@@ -15,7 +15,7 @@ void main() {
   testWidgets('Home screen shows app title', (WidgetTester tester) async {
     await tester.pumpWidget(const ProviderScope(child: BallSpeedApp()));
 
-    expect(find.text('Ball Speed Analyzer'), findsOneWidget);
+    expect(find.text('Cricket Ball Speed Analyzer'), findsOneWidget);
     expect(find.text('Start Session'), findsOneWidget);
   });
 
@@ -35,7 +35,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Enter a session name'), findsOneWidget);
-    expect(find.text('Must be between 10 and 25 meters'), findsOneWidget);
+    expect(find.text('Must be between 8 and 25 meters'), findsOneWidget);
   });
 
   testWidgets('Session setup fits a portrait phone screen without scrolling', (tester) async {

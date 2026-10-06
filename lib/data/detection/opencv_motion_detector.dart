@@ -186,7 +186,16 @@ class OpenCvMotionDetector implements BallDetector {
         (_roiCellX + _centroids.at<double>(i, 0) + 0.5) * cellSize,
         (_roiCellY + _centroids.at<double>(i, 1) + 0.5) * cellSize,
       );
-      blobs.add(MotionBlob(x, y, _stats.at<int>(i, cv.CC_STAT_AREA)));
+      // Opposite corners of the bounding box give its reach in reference units.
+      final left = (_roiCellX + _stats.at<int>(i, cv.CC_STAT_LEFT)) * cellSize.toDouble();
+      final top = (_roiCellY + _stats.at<int>(i, cv.CC_STAT_TOP)) * cellSize.toDouble();
+      final (x0, y0) = layout.toReference(left, top);
+      final (x1, y1) = layout.toReference(
+        left + _stats.at<int>(i, cv.CC_STAT_WIDTH) * cellSize,
+        top + _stats.at<int>(i, cv.CC_STAT_HEIGHT) * cellSize,
+      );
+      final radius = sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0)) / 2;
+      blobs.add(MotionBlob(x, y, _stats.at<int>(i, cv.CC_STAT_AREA), radius: radius));
     }
     return blobs;
   }

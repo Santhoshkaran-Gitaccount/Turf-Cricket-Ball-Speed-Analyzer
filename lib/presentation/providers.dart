@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../data/device_motion.dart';
 import '../data/repositories/in_memory_session_repository.dart';
 import '../domain/repositories/session_repository.dart';
 import '../domain/usecases/session_usecases.dart';
@@ -26,6 +27,13 @@ const ballModelAsset = 'assets/models/ball_detector.tflite';
 
 /// The TensorFlow Lite model bytes, or null when no model is bundled, in
 /// which case detection falls back to OpenCV motion detection.
+/// Whether the phone is turning, from its gyroscope.
+final deviceMotionProvider = Provider.autoDispose<DeviceMotion>((ref) {
+  final motion = DeviceMotion();
+  ref.onDispose(motion.dispose);
+  return motion;
+});
+
 final ballModelProvider = FutureProvider<Uint8List?>((ref) async {
   try {
     final data = await rootBundle.load(ballModelAsset);

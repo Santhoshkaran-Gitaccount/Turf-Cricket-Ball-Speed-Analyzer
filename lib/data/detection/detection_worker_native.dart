@@ -78,6 +78,7 @@ class DetectionWorker {
       frame.timestampMicros,
       rotationDegrees,
       screenAspect,
+      frame.deviceMoving,
     ));
     return true;
   }
@@ -106,6 +107,7 @@ class _Frame {
     this.timestampMicros,
     this.rotationDegrees,
     this.screenAspect,
+    this.deviceMoving,
   );
 
   final TransferableTypedData bytes;
@@ -115,6 +117,7 @@ class _Frame {
   final int timestampMicros;
   final int rotationDegrees;
   final double? screenAspect;
+  final bool deviceMoving;
 }
 
 class _Reset {
@@ -165,6 +168,7 @@ void _run((SendPort, DetectorConfig) args) {
               height: message.height,
               bytesPerRow: message.bytesPerRow,
               timestampMicros: message.timestampMicros,
+              deviceMoving: message.deviceMoving,
             ));
         } catch (error, stack) {
           // One bad frame must not stop detection.

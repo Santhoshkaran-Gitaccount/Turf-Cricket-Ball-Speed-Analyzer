@@ -19,7 +19,14 @@ class HomeScreen extends StatelessWidget {
               // Same logo as the launcher icon and splash screen.
               Image.asset('assets/icon/logo.png', width: 160, height: 160),
               const SizedBox(height: 16),
-              Text('Ball Speed Analyzer', style: textTheme.headlineMedium),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Text(
+                  'Cricket Ball Speed Analyzer',
+                  style: textTheme.headlineMedium,
+                  textAlign: TextAlign.center,
+                ),
+              ),
               const SizedBox(height: 8),
               Text(
                 'Measure bowling speed with your phone camera',

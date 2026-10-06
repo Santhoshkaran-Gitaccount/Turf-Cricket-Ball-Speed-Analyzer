@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Delivery Simulator</title>
+<style>
+  :root {
+    --bg: #0d120c;
+    --panel: rgba(16, 20, 15, 0.92);
+    --text: #e6ebe4;
+    --muted: #9aa597;
+    --accent: #a2d39c;
+    --border: #2c3a2a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #panel {
+    position: fixed; top: 12px; right: 12px; width: 250px; padding: 14px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  }
+  #panel.hidden { display: none; }
+  h1 { font-size: 15px; margin: 0 0 10px; }
+  label { display: block; color: var(--muted); margin: 10px 0 4px; }
+  input[type=range], select { width: 100%; }
+  select, input[type=number] { background: #1b2319; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px; }
+  input[type=number] { width: 100%; }
+  .value { float: right; color: var(--text); }
+  button {
+    width: 100%; margin-top: 12px; padding: 10px; border: 0; border-radius: 999px;
+    background: var(--accent); color: #10200e; font-weight: 600; font-size: 15px; cursor: pointer;
+  }
+  button.secondary { background: #1b2319; color: var(--text); border: 1px solid var(--border); font-weight: 500; }
+  .row { display: flex; gap: 8px; }
+  .row button { flex: 1; }
+  #log { margin-top: 10px; max-height: 160px; overflow: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #log div { padding: 2px 0; border-top: 1px solid var(--border); }
+  #status { position: fixed; left: 12px; bottom: 12px; color: var(--muted); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div id="panel">
+  <h1>Delivery simulator</h1>
+  <label>Speed <span class="value" id="speedValue"></span></label>
+  <input type="range" id="speed" min="40" max="160" step="1" value="120">
+  <label>Ball</label>
+  <select id="ball">
+    <option value="tennis">Tennis</option>
+    <option value="leather">Leather</option>
+    <option value="white">White / synthetic</option>
+  </select>
+  <label>Pitch length (m)</label>
+  <input type="number" id="pitch" min="8" max="25" step="0.01" value="20.12">
+  <label>Delay before release <span class="value" id="delayValue"></span></label>
+  <input type="range" id="delay" min="0" max="10" step="1" value="3">
+  <button id="bowl">Bowl (Space)</button>
+  <div class="row">
+    <button class="secondary" id="auto">Auto: off</button>
+    <button class="secondary" id="full">Full screen</button>
+  </div>
+  <div class="hint">H hides this panel. In the app, set the same pitch length and tap the two sets of stumps shown here.</div>
+  <div id="log"></div>
+</div>
+<div id="status"></div>
+<script>
+// Same camera as ml/eval_deliveries.py, matched to the app's standard pitch view:
+// 2 m behind the batting stumps, 1.2 m up; bowling stumps' base at 0.35 of the
+// height, batting stumps' base at 0.95. Drawn in a 16:9 area, like the phone sees in landscape.
+const CAMERA_BACK = 2.0, CAMERA_HEIGHT = 1.2, BALL_RADIUS = 0.036;
+const FAR = 0.35, NEAR = 0.95;
+const BALLS = {
+  tennis: { body: '#d9ef3c', shade: '#9fb02a', highlight: 'rgba(255,255,255,0.35)' },
+  leather: { body: '#a3201d', shade: '#5e0f0d', highlight: 'rgba(255,220,220,0.75)' },
+  white: { body: '#f4f4f0', shade: '#bdbdb8', highlight: 'rgba(255,255,255,0.6)' },
+};
+
+const canvas = document.getElementById('view');
+const ctx = canvas.getContext('2d');
+const $ = (id) => document.getElementById(id);
+let W = 0, H = 0, OX = 0, OY = 0, dpr = 1;
+let delivery = null; // { start, v, pitch, kind, bounceZ, lateral, drift, endZ }
+let autoTimer = null, countdownUntil = 0;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  // Largest 16:9 area in the window.
+  const cw = canvas.width, ch = canvas.height;
+  if (cw / ch > 16 / 9) { H = ch; W = ch * 16 / 9; } else { W = cw; H = cw * 9 / 16; }
+  OX = (cw - W) / 2; OY = (ch - H) / 2;
+}
+addEventListener('resize', resize);
+resize();
+
+function camera(pitch) {
+  const farZ = CAMERA_BACK + pitch;
+  const f = (NEAR - FAR) * H / (CAMERA_HEIGHT * (1 / CAMERA_BACK - 1 / farZ));
+  const horizon = NEAR * H - f * CAMERA_HEIGHT / CAMERA_BACK;
+  return {
+    f, horizon, farZ,
+    project: (x, z, h) => [OX + W / 2 + f * x / z, OY + horizon + f * (CAMERA_HEIGHT - h) / z],
+  };
+}
+
+function drawScene(cam) {
+  ctx.fillStyle = '#05070a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Sky / back wall, then the turf.
+  ctx.fillStyle = '#1d2a3a';
+  ctx.fillRect(OX, OY, W, cam.horizon);
+  ctx.fillStyle = '#2f6b2c';
+  ctx.fillRect(OX, OY + cam.horizon, W, H - cam.horizon);
+  // Pitch strip, 3 m wide, from behind the bowling stumps to the camera.
+  const p = (x, z) => cam.project(x, z, 0);
+  ctx.fillStyle = '#b9a77a';
+  ctx.beginPath();
+  [p(-1.5, cam.farZ + 1.2), p(1.5, cam.farZ + 1.2), p(1.5, 0.9), p(-1.5, 0.9)].forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+  ctx.closePath();
+  ctx.fill();
+  // Creases.
+  ctx.strokeStyle = '#f2f2ee';
+  for (const z of [cam.farZ, CAMERA_BACK + 1.22, cam.farZ - 1.22, CAMERA_BACK]) {
+    const [x0, y] = p(-1.4, z), [x1] = p(1.4, z);
+    ctx.lineWidth = Math.max(1, cam.f * 0.05 / z);
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+  }
+  // Stumps at both ends: 71 cm tall, 22.9 cm across.
+  ctx.strokeStyle = '#e8d9b0';
+  for (const z of [cam.farZ, CAMERA_BACK]) {
+    ctx.lineWidth = Math.max(1.5, cam.f * 0.035 / z);
+    for (const x of [-0.1, 0, 0.1]) {
+      const [x0, y0] = cam.project(x, z, 0), [x1, y1] = cam.project(x, z, 0.71);
+      ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    }
+  }
+}
+
+function ballAt(d, t) {
+  const releaseZ = CAMERA_BACK + d.pitch;
+  const z = releaseZ - d.v * t;
+  let h;
+  if (z >= d.bounceZ) {
+    const k = (releaseZ - z) / (releaseZ - d.bounceZ);
+    h = 2.1 * (1 - Math.pow(k, 1.6));
+  } else {
+    const k = (d.bounceZ - z) / (d.bounceZ - d.endZ);
+    h = 0.9 * Math.sin(Math.min(1, k) * Math.PI * 0.45);
+  }
+  return { x: d.lateral + d.drift * (releaseZ - z) / d.pitch, z, h: Math.max(h, BALL_RADIUS) };
+}
+
+function drawBall(cam, d, t) {
+  const b = ballAt(d, t);
+  if (b.z <= d.endZ) return false;
+  const [x, y] = cam.project(b.x, b.z, b.h);
+  const r = Math.max(0.8, cam.f * BALL_RADIUS / b.z);
+  const c = BALLS[d.kind];
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.1, x, y, r);
+  g.addColorStop(0, c.highlight);
+  g.addColorStop(0.25, c.body);
+  g.addColorStop(1, c.shade);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  return true;
+}
+
+function bowl() {
+  const pitch = Math.min(25, Math.max(8, parseFloat($('pitch').value) || 20.12));
+  const kmh = parseFloat($('speed').value);
+  const delay = parseFloat($('delay').value) * 1000;
+  countdownUntil = performance.now() + delay;
+  delivery = {
+    start: countdownUntil, v: kmh / 3.6, kmh, pitch, kind: $('ball').value,
+    bounceZ: CAMERA_BACK + Math.min(pitch * 0.45, 3 + Math.random() * 5),
+    lateral: (Math.random() - 0.5) * 0.3, drift: (Math.random() - 0.5) * 0.6, endZ: 0.6,
+    logged: false,
+  };
+}
+
+function frame(now) {
+  const cam = camera(delivery ? delivery.pitch : parseFloat($('pitch').value) || 20.12);
+  drawScene(cam);
+  let status = 'Ready. Press Space or Bowl.';
+  if (delivery) {
+    const t = (now - delivery.start) / 1000;
+    if (t < 0) {
+      status = `Release in ${Math.ceil(-t)} s — ${delivery.kmh} km/h, ${delivery.kind}`;
+    } else if (drawBall(cam, delivery, t)) {
+      status = 'Ball in flight';
+    } else {
+      if (!delivery.logged) {
+        delivery.logged = true;
+        const entry = document.createElement('div');
+        const time = new Date().toLocaleTimeString();
+        entry.textContent = `${time}  ${delivery.kmh} km/h  ${delivery.kind}  ${delivery.pitch} m`;
+        $('log').prepend(entry);
+      }
+      status = `Last ball: ${delivery.kmh} km/h (true speed) — compare with the app`;
+    }
+  }
+  $('status').textContent = status;
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+const show = () => { $('speedValue').textContent = `${$('speed').value} km/h`; $('delayValue').textContent = `${$('delay').value} s`; };
+['speed', 'delay'].forEach((id) => $(id).addEventListener('input', show));
+show();
+$('bowl').addEventListener('click', bowl);
+$('full').addEventListener('click', () => document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+$('auto').addEventListener('click', () => {
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; $('auto').textContent = 'Auto: off'; return; }
+  bowl();
+  autoTimer = setInterval(bowl, 8000);
+  $('auto').textContent = 'Auto: every 8 s';
+});
+addEventListener('keydown', (e) => {
+  if (e.code === 'Space') { e.preventDefault(); bowl(); }
+  if (e.key === 'h' || e.key === 'H') $('panel').classList.toggle('hidden');
+});
+</script>
+</body>
+</html>

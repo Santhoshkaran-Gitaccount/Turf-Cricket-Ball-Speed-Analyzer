@@ -11,6 +11,7 @@ class LumaFrame {
     required this.height,
     required this.bytesPerRow,
     required this.timestampMicros,
+    this.deviceMoving = false,
   });
 
   final Uint8List bytes;
@@ -18,6 +19,9 @@ class LumaFrame {
   final int height;
   final int bytesPerRow;
   final int timestampMicros;
+
+  /// The phone's motion sensors say it was turning when the frame was taken.
+  final bool deviceMoving;
 }
 
 /// Whether a frame could be used to look for the ball.
@@ -37,7 +41,7 @@ enum FrameStatus {
 
 /// Something ball-like found in a frame.
 class MotionBlob {
-  const MotionBlob(this.x, this.y, this.area);
+  const MotionBlob(this.x, this.y, this.area, {this.radius = 0});
 
   /// Centre in normalized reference coordinates (see [ViewTransform]).
   final double x;
@@ -45,6 +49,10 @@ class MotionBlob {
 
   /// Size in 4×4-pixel cells.
   final int area;
+
+  /// Half the diagonal of its bounding box, in reference coordinates: how far
+  /// from the centre it reaches.
+  final double radius;
 }
 
 /// What a [BallDetector] found in one frame.

@@ -43,6 +43,7 @@ dependencies:
   tflite_flutter: ^0.12.1
   ffi: ^2.2.0
   wakelock_plus: ^1.8.1
+  sensors_plus: ^7.1.1
 
 dev_dependencies:
   flutter_test:
@@ -105,11 +106,12 @@ flutter:
 #   dart run flutter_native_splash:create
 # The splash tool rewrites AndroidManifest.xml; check android:screenOrientation="portrait" is still there.
 flutter_launcher_icons:
-  android: true
+  android: "launcher_icon"
   ios: true
-  image_path: assets/icon/app_icon.png
-  adaptive_icon_background: "#10140F"
-  adaptive_icon_foreground: assets/icon/app_icon_foreground.png
+  # The launcher icon only; the in-app logo and splash keep assets/icon/logo.png and app_icon_foreground.png.
+  image_path: assets/icon/launcher_flutter.png
+  adaptive_icon_background: "#E7E9EB"
+  adaptive_icon_foreground: assets/icon/launcher_flutter.png
   remove_alpha_ios: true
   min_sdk_android: 30
 

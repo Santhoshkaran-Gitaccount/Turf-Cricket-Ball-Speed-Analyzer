@@ -13,6 +13,7 @@ import 'package:turf_cricket_ball_speed_analyzer/domain/entities/session.dart';
 import 'package:turf_cricket_ball_speed_analyzer/presentation/providers.dart';
 import 'package:turf_cricket_ball_speed_analyzer/presentation/tracking/tracking_controller.dart';
 import 'package:turf_cricket_ball_speed_analyzer/presentation/tracking/tracking_state.dart';
+import 'package:turf_cricket_ball_speed_analyzer/data/device_motion.dart';
 
 import 'support/synthetic_frames.dart';
 
@@ -29,7 +30,10 @@ void main() {
 
   setUp(() async {
     repository = InMemorySessionRepository();
-    container = ProviderContainer(overrides: [sessionRepositoryProvider.overrideWithValue(repository)]);
+    container = ProviderContainer(overrides: [
+      sessionRepositoryProvider.overrideWithValue(repository),
+      deviceMotionProvider.overrideWithValue(DeviceMotion(gyroscope: const Stream.empty())),
+    ]);
     addTearDown(container.dispose);
     session = await container.read(startSessionProvider)(
       name: 'Nets',

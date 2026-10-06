@@ -236,13 +236,15 @@ void main() {
       expect(h.deliveries, isEmpty);
     });
 
-    test('duration out of range for an impossibly fast delivery', () {
+    test('an impossibly fast crossing is not counted as a delivery at all', () {
       final h = _harness();
       h.empty(5);
       h.ball(0.22, 0.62, 20); // 0.17 s
       h.empty(20);
 
-      expect(h.invalid, [InvalidReason.durationOutOfRange]);
+      expect(h.invalid, isEmpty);
+      expect(h.deliveries, isEmpty);
+      expect(h.events.whereType<TrackDiscarded>().single.tooFast, isTrue);
     });
 
     test('duration out of range for a delivery that takes too long', () {
@@ -314,6 +316,36 @@ void main() {
       expect(h.invalid, isEmpty, reason: 'noise must not be recorded as invalid deliveries either');
     });
 
+    test('someone walking down the pitch to the phone is not a ball', () {
+      final h = _harness();
+      h.empty(5);
+      // A person coming towards the camera, with a ball-sized bright spot (a
+      // hand, a shoe) moving along with them at the side.
+      for (var i = 0; i <= 60; i++) {
+        final t = i / 60;
+        final y = 0.30 + 0.45 * t;
+        // Grows as they come closer, as everything does in perspective.
+        final w = 0.04 + 0.08 * t;
+        h.frame(syntheticPixels(people: [(0.5, y, w, w * 2.5)], balls: [(0.5 + w / 2 + 0.025, y + 0.02)]));
+      }
+      h.empty(20);
+
+      expect(h.deliveries, isEmpty);
+      expect(h.invalid, isEmpty);
+    });
+
+    test('a ball bowled with the bowler still in view is measured', () {
+      final h = _harness();
+      h.empty(5);
+      // The bowler stays at the far end, following through, while the ball flies.
+      for (var i = 0; i <= 60; i++) {
+        h.frame(syntheticPixels(people: [(0.45 + 0.02 * (i % 6) / 6, 0.16, 0.04, 0.10)], balls: [(0.5, 0.22 + 0.40 * i / 60)]));
+      }
+      h.empty(20);
+
+      expect(h.deliveries, hasLength(1));
+    });
+
     test('a waving hand is not a ball', () {
       final h = _harness();
       h.empty(5);
@@ -357,6 +389,51 @@ void main() {
       expect(h.events.whereType<CameraSteadinessChanged>().map((e) => e.steady), [false, true]);
     });
 
+    // Found on a real phone: tilting the phone slowly showed "ball in flight".
+    // Only edges change, far less than the whole view, and specks in the
+    // scene slide down the screen just like a ball. The gyroscope sees the turn.
+    for (final (name, dx, dy) in [('tilted up', 0.0, 1.0), ('tilted slowly', 0.0, 0.5), ('moved diagonally', 0.7, 0.7)]) {
+      test('a camera $name is not a ball in flight', () {
+        final h = _harness();
+        for (var i = 0; i < 20; i++) {
+          h.frame(texturedPixels());
+        }
+        for (var i = 0; i <= 120; i++) {
+          h.frame(texturedPixels(shiftX: dx * i, shiftY: dy * i), deviceMoving: true);
+        }
+        for (var i = 0; i < 20; i++) {
+          h.frame(texturedPixels(shiftX: dx * 120, shiftY: dy * 120));
+        }
+
+        expect(h.events.whereType<ReleaseDetected>(), isEmpty);
+        expect(h.deliveries, isEmpty);
+        expect(h.invalid, isEmpty);
+        expect(h.events.whereType<CameraSteadinessChanged>().map((e) => e.steady).firstOrNull, isFalse);
+      });
+    }
+
+    test('a ball bowled past markings and specks on a fixed camera is measured', () {
+      final h = _harness();
+      for (var i = 0; i < 20; i++) {
+        h.frame(texturedPixels());
+      }
+      for (var i = 0; i <= 60; i++) {
+        final pixels = texturedPixels();
+        final y = 0.22 + 0.40 * i / 60;
+        final ball = syntheticPixels(balls: [(0.5, y)]);
+        for (var p = 0; p < pixels.length; p++) {
+          if (ball[p] != background) pixels[p] = ball[p];
+        }
+        h.frame(pixels);
+      }
+      for (var i = 0; i < 20; i++) {
+        h.frame(texturedPixels());
+      }
+
+      expect(h.deliveries, hasLength(1));
+      expect(h.events.whereType<CameraSteadinessChanged>(), isEmpty);
+    });
+
     test('a busy scene on a fixed camera is not reported as the camera moving', () {
       final h = _harness();
       final random = Random(5);
@@ -383,14 +460,28 @@ void main() {
       expect(h.deliveries.single.speedKmh, closeTo(145, 15));
     });
 
-    test('a speed above 165 km/h is out of range', () {
+    test('a speed above 165 km/h is not counted, e.g. a pitch length set too long', () {
       final h = _harness();
       h.empty(5);
       h.ball(0.22, 0.62, 50); // 20.12 m in 0.42 s = 174 km/h
       h.empty(20);
 
       expect(h.deliveries, isEmpty);
-      expect(h.invalid, [InvalidReason.durationOutOfRange]);
+      expect(h.invalid, isEmpty);
+      expect(h.events.whereType<TrackDiscarded>().single.tooFast, isTrue);
+    });
+
+    test('one ball rolling on after an invalid delivery is not counted again', () {
+      final h = _harness();
+      h.empty(5);
+      h.ball(0.22, 0.46, 40); // lost mid-pitch: invalid
+      // Within a second the same ball comes down the pitch again, as it rolls on.
+      h.empty(30);
+      h.ball(0.22, 0.62, 60);
+      h.empty(20);
+
+      expect(h.invalid, [InvalidReason.trackingLost], reason: 'one ball, one record');
+      expect(h.deliveries, isEmpty);
     });
   });
 }

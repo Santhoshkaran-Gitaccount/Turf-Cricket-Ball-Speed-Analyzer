@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/formatters.dart';
 import '../../data/detection/detection_worker.dart';
 import '../../domain/detection/delivery_detector.dart';
 import '../../domain/detection/pitch_geometry.dart';
@@ -24,6 +25,10 @@ class TrackingController extends Notifier<TrackingState> {
   static const autoSaveDelay = Duration(seconds: 5);
   static const _noticeDuration = Duration(seconds: 3);
 
+  /// What became of a ball that gave no result card stays up longer, so it
+  /// can be read from behind the bowler's arm.
+  static const _resultNoticeDuration = Duration(seconds: 5);
+
   DetectionWorker? _worker;
   Timer? _autoSaveTimer;
   Timer? _noticeTimer;
@@ -32,6 +37,8 @@ class TrackingController extends Notifier<TrackingState> {
 
   @override
   TrackingState build() {
+    // Kept for as long as the session's camera screen is open.
+    ref.watch(deviceMotionProvider);
     ref.onDispose(() {
       _autoSaveTimer?.cancel();
       _noticeTimer?.cancel();
@@ -107,6 +114,7 @@ class TrackingController extends Notifier<TrackingState> {
         height: height,
         bytesPerRow: bytesPerRow,
         timestampMicros: _clock.elapsedMicroseconds,
+        deviceMoving: ref.read(deviceMotionProvider).moving,
       ),
       rotationDegrees: rotationDegrees,
       screenAspect: screenAspect,
@@ -200,15 +208,24 @@ class TrackingController extends Notifier<TrackingState> {
         savePending();
         _autoSaveTimer = Timer(autoSaveDelay, savePending);
         state = state.copyWith(pending: measurement, pendingAt: DateTime.now(), ballInFlight: false);
-      case TrackDiscarded():
-        // Not a ball after all; nothing is recorded.
+      case TrackDiscarded(:final tooFast):
+        // Not a ball after all; nothing is recorded. "Ball detected" was
+        // already shown, so say what became of it.
         state = state.copyWith(ballInFlight: false);
+        _showNotice(
+          tooFast
+              ? 'Not counted: too fast for ${formatPitchLength(session.pitchLengthMeters)}. Check the pitch length.'
+              : 'Not counted: lost the ball',
+          duration: _resultNoticeDuration,
+        );
       case CameraSteadinessChanged(:final steady):
         state = state.copyWith(cameraSteady: steady);
       case DeliveryInvalid(:final reason):
+        // A valid ball still on its card came first, so it is numbered first.
+        savePending();
         _persist(ref.read(recordInvalidDeliveryProvider)(session, reason));
         state = state.copyWith(ballInFlight: false, revision: state.revision + 1);
-        _showNotice('Invalid delivery: ${reason.label}');
+        _showNotice('Invalid delivery: ${reason.label}', duration: _resultNoticeDuration);
     }
   }
 
@@ -220,9 +237,9 @@ class TrackingController extends Notifier<TrackingState> {
     }));
   }
 
-  void _showNotice(String message) {
+  void _showNotice(String message, {Duration duration = _noticeDuration}) {
     _noticeTimer?.cancel();
-    _noticeTimer = Timer(_noticeDuration, () {
+    _noticeTimer = Timer(duration, () {
       if (ref.mounted) state = state.copyWith(notice: null);
     });
     state = state.copyWith(notice: message);

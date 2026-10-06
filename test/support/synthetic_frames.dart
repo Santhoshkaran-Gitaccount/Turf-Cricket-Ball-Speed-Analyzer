@@ -1,6 +1,7 @@
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'package:opencv_dart/opencv_dart.dart' as cv;
 import 'package:turf_cricket_ball_speed_analyzer/data/detection/opencv_motion_detector.dart';
 import 'package:turf_cricket_ball_speed_analyzer/domain/detection/delivery_detector.dart';
 import 'package:turf_cricket_ball_speed_analyzer/domain/entities/delivery.dart';
@@ -22,9 +23,21 @@ Uint8List syntheticPixels({
   int brightness = 0,
   int noise = 0,
   bool flip = false,
+  List<(double, double, double, double)> people = const [],
 }) {
   final ballSize = (4 * width / 640).round();
   final bytes = Uint8List(width * height)..fillRange(0, width * height, background + brightness);
+  // A person: a large patterned patch (centre x, centre y, width, height),
+  // like clothing, so all of it changes as it moves, not just its outline.
+  for (final (cx, cy, w, h) in people) {
+    final left = ((cx - w / 2) * width).round();
+    final top = ((cy - h / 2) * height).round();
+    for (var row = max(0, top); row < min(height, top + (h * height).round()); row++) {
+      for (var col = max(0, left); col < min(width, left + (w * width).round()); col++) {
+        bytes[row * width + col] = ((row ~/ 6) + (col ~/ 6)).isEven ? 200 : 110;
+      }
+    }
+  }
   if (noise > 0) {
     for (var i = 0; i < bytes.length; i++) {
       bytes[i] = (bytes[i] + _noiseRandom.nextInt(2 * noise + 1) - noise).clamp(0, 255);
@@ -47,6 +60,51 @@ Uint8List syntheticPixels({
   }
   return bytes;
 }
+
+/// A fixed scene with detail in it (markings, kit bags, specks on the turf),
+/// seen from a camera whose view has moved [shiftX], [shiftY] pixels: the
+/// scene appears that far the other way, as when the phone is tilted or
+/// panned. Fractional shifts blend neighbouring pixels, as a lens does.
+Uint8List texturedPixels({int width = 640, int height = 360, double shiftX = 0, double shiftY = 0}) {
+  final scene = _texturedScene(width, height);
+  if (shiftX == 0 && shiftY == 0) return Uint8List.fromList(scene);
+  final src = cv.Mat.fromList(height, width, cv.MatType.CV_8UC1, scene);
+  final translation = cv.Mat.fromList(2, 3, cv.MatType.CV_64FC1, [1.0, 0.0, shiftX, 0.0, 1.0, shiftY]);
+  final dst = cv.warpAffine(src, translation, (width, height), borderMode: cv.BORDER_REFLECT);
+  final bytes = Uint8List.fromList(dst.data);
+  for (final mat in [src, translation, dst]) {
+    mat.dispose();
+  }
+  return bytes;
+}
+
+final _scenes = <(int, int), Uint8List>{};
+
+Uint8List _texturedScene(int width, int height) => _scenes.putIfAbsent((width, height), () {
+      final random = Random(21);
+      (int, int, int, int, int) patch(int maxW, int maxH, int minLuma, int lumaRange) => (
+            random.nextInt(width),
+            random.nextInt(height),
+            2 + random.nextInt(maxW),
+            2 + random.nextInt(maxH),
+            minLuma + random.nextInt(lumaRange),
+          );
+      final patches = [
+        // Faint blotches in the turf: too faint to count as motion on their own.
+        for (var i = 0; i < 400; i++) patch(40, 40, background - 12, 24),
+        // A few specks and markings that stand out.
+        for (var i = 0; i < 24; i++) patch(i.isEven ? 4 : 30, 4, 140, 110),
+      ];
+      final bytes = Uint8List(width * height)..fillRange(0, width * height, background);
+      for (final (left, top, w, h, luma) in patches) {
+        for (var row = top; row < min(height, top + h); row++) {
+          for (var col = left; col < min(width, left + w); col++) {
+            bytes[row * width + col] = luma;
+          }
+        }
+      }
+      return bytes;
+    });
 
 /// Drives a [DeliveryDetector] backed by OpenCV with synthetic frames.
 class DetectorHarness {
@@ -78,7 +136,8 @@ class DetectorHarness {
   late final DeliveryDetector detector;
   var _index = 0;
 
-  void frame(Uint8List bytes) {
+  /// [deviceMoving] is what the phone's gyroscope would say.
+  void frame(Uint8List bytes, {bool deviceMoving = false}) {
     detector.process(LumaFrame(
       bytes: bytes,
       width: width,
@@ -86,6 +145,7 @@ class DetectorHarness {
       bytesPerRow: width,
       timestampMicros: (_index++ * 1e6 / fps).round() +
           (jitterMicros == 0 ? 0 : _random.nextInt(2 * jitterMicros + 1) - jitterMicros),
+      deviceMoving: deviceMoving,
     ));
   }
 

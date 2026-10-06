@@ -72,7 +72,11 @@ class DeliveryDetector {
     // Keep one instance while nothing changes so detectors can cache per layout.
     if (layout != _layout) _layout = layout;
 
-    final detection = _ballDetector.detect(frame, _layout!);
+    final detected = _ballDetector.detect(frame, _layout!);
+    // A phone turned slowly changes only the edges in view, and specks in the
+    // scene then slide down the screen like a ball. The motion sensors notice
+    // the turn whatever is in view.
+    final detection = frame.deviceMoving ? const BallDetection(FrameStatus.cameraMoved) : detected;
     _tracker.update(detection.blobs, frame.timestampMicros, status: detection.status);
 
     final visible = detection.status != FrameStatus.tooDark && detection.status != FrameStatus.tooBright;

@@ -15,7 +15,7 @@ class BallSpeedApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Ball Speed Analyzer',
+      title: 'Cricket Ball Speed Analyzer',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorScheme: colorScheme),
       home: const HomeScreen(),

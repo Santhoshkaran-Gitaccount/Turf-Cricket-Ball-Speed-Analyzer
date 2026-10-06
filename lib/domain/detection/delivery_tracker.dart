@@ -38,7 +38,12 @@ class DeliveryInvalid extends DeliveryEvent {
 /// one (hand movement, camera shake, noise). It is not a delivery, valid or
 /// invalid, and is not recorded.
 class TrackDiscarded extends DeliveryEvent {
-  const TrackDiscarded();
+  const TrackDiscarded({this.tooFast = false});
+
+  /// It crossed the pitch faster than any ball can be bowled over the
+  /// entered pitch length: something else, or a pitch length set longer
+  /// than the real distance.
+  final bool tooFast;
 }
 
 /// The camera started or stopped moving. While it moves, no new delivery is
@@ -96,7 +101,9 @@ class DeliveryTracker {
   static const _maxSeedArea = 30;
   static const _maxBallArea = 150;
   static const _cooldownAfterDeliveryMicros = 1500000;
-  static const _cooldownAfterInvalidMicros = 500000;
+  /// As long as after a valid delivery: the same ball bouncing on, rolling or
+  /// being picked up must not be taken for further deliveries.
+  static const _cooldownAfterInvalidMicros = 1500000;
   static const _minTravelMicros = 200000;
   static const _maxTravelMicros = 3000000;
   static const _minKmh = 15;
@@ -119,6 +126,26 @@ class DeliveryTracker {
   /// busy or noisy (players, grass, sensor noise), so no new track is started
   /// from that frame. It says nothing about the camera itself.
   static const _maxBallSizedBlobs = 6;
+
+  /// A ball-sized patch closer than this to something large is part of it.
+  static const _isolationMargin = 0.02;
+
+  /// The largest patch that can be the ball at height [y] on screen: a ball
+  /// looks small at the far end and grows towards the camera, while a person
+  /// at the far end can be as big on screen as a ball beside the camera.
+  /// The share of [_maxBallArea] grows with the pitch's width (not its square),
+  /// leaving room for motion blur.
+  int _maxAreaAt(double y) {
+    final share = (geometry.halfWidthAt(y) / geometry.nearHalfWidth).clamp(0.0, 1.0);
+    return max(_maxSeedArea, (_maxBallArea * share).round());
+  }
+
+  /// After a bounce the ball can rise on screen a little from one frame to
+  /// the next; a candidate with a few points already may do the same.
+  static const _bounceRise = 0.02;
+
+  /// How much larger than [_maxAreaAt] the ball may grow while followed.
+  static const _inFlightAreaGrowth = 4;
 
   /// The ball must be seen in at least this share of its frames in flight.
   static const _minDetectionRate = 0.5;
@@ -165,7 +192,22 @@ class DeliveryTracker {
     }
     _lastFrameMicros = timeMicros;
 
-    final unused = blobs.where((b) => b.area <= _maxBallArea).toList();
+    // Something large moving down the pitch is a person (often the bowler
+    // walking up to the phone), and bits of it (a hand, a shoe, the edge of a
+    // shirt) are ball-sized and travel just like a ball. A ball in flight is on
+    // its own; only at the bowler's hand is it next to a body. (Near the
+    // batsman it is lost a moment early, and still completes in the batsman area.)
+    final large = blobs.where((b) => b.area > _maxAreaAt(b.y)).toList();
+    bool nextToLarge(MotionBlob b) => large.any((l) {
+          final dx = b.x - l.x;
+          final dy = b.y - l.y;
+          final reach = l.radius + b.radius + _isolationMargin;
+          return dx * dx + dy * dy <= reach * reach;
+        });
+    final unused = [
+      for (final b in blobs)
+        if (b.area <= _maxAreaAt(b.y) && (geometry.isReleaseZone(b.x, b.y) || !nextToLarge(b))) b,
+    ];
     final moved = status == FrameStatus.cameraMoved;
     final noisy = unused.length > _maxBallSizedBlobs;
     if (moved) _unsettledUntil = timeMicros + _settleMicros;
@@ -193,7 +235,14 @@ class DeliveryTracker {
 
     if (ball != null) {
       _flightFrames++;
-      final match = _bestMatch(ball, unused, timeMicros, allowUpward: true);
+      // Near the camera the ball is large and smeared by motion blur; once it
+      // is being followed, it may be larger than a new track could start from.
+      final reachable = [
+        ...unused,
+        for (final b in blobs)
+          if (b.area > _maxAreaAt(b.y) && b.area <= _maxAreaAt(b.y) * _inFlightAreaGrowth) b,
+      ];
+      final match = _bestMatch(ball, reachable, timeMicros, allowUpward: true);
       if (match != null) {
         unused.remove(match);
         _framesSinceSeen = 0;
@@ -295,7 +344,7 @@ class DeliveryTracker {
     MotionBlob? best;
     var bestDistance = gate;
     for (final blob in blobs) {
-      if (!allowUpward && blob.y < last.y - 0.005) continue;
+      if (!allowUpward && blob.y < last.y - (track.points.length >= 3 ? _bounceRise : 0.005)) continue;
       final dx = blob.x - predictedX;
       final dy = blob.y - predictedY;
       final distance = sqrt(dx * dx + dy * dy);
@@ -323,7 +372,13 @@ class DeliveryTracker {
     // Duration is checked before detection quality: it is measured directly,
     // and a very slow ball also moves too little per frame to be seen often.
     final travelTime = Duration(microseconds: _travelMicros(track.points, end));
-    if (travelTime.inMicroseconds < _minTravelMicros || travelTime.inMicroseconds > _maxTravelMicros) {
+    // Faster than any bowler is not a delivery at all, so it is not recorded;
+    // slower than any delivery still is one, recorded as invalid.
+    if (travelTime.inMicroseconds < _minTravelMicros) {
+      _discard(completedAt, tooFast: true);
+      return;
+    }
+    if (travelTime.inMicroseconds > _maxTravelMicros) {
       _invalid(InvalidReason.durationOutOfRange, completedAt);
       return;
     }
@@ -331,7 +386,11 @@ class DeliveryTracker {
     // Release is at the bowling crease and completion at the batting end, so
     // the ball covered roughly the full pitch length.
     final speedKmh = DeliveryMeasurement.calculateSpeedKmh(pitchLengthMeters, travelTime);
-    if (speedKmh < _minKmh || speedKmh > _maxKmh) {
+    if (speedKmh > _maxKmh) {
+      _discard(completedAt, tooFast: true);
+      return;
+    }
+    if (speedKmh < _minKmh) {
       // For a fixed pitch length an impossible speed is an impossible duration.
       _invalid(InvalidReason.durationOutOfRange, completedAt);
       return;
@@ -413,11 +472,11 @@ class DeliveryTracker {
     onEvent(DeliveryInvalid(reason));
   }
 
-  void _discard(int timeMicros) {
+  void _discard(int timeMicros, {bool tooFast = false}) {
     _ball = null;
     _candidates.clear();
     _cooldownUntil = timeMicros + _cooldownAfterInvalidMicros;
-    onEvent(const TrackDiscarded());
+    onEvent(TrackDiscarded(tooFast: tooFast));
   }
 
   void _updateSteadiness(int timeMicros, {required bool moved}) {
@@ -461,13 +520,31 @@ class DeliveryTracker {
     // On screen a ball moves smoothly over time, speeding up gradually as it
     // nears the camera, so its position fits a gentle curve. Unrelated patches
     // chained together jump back and forth around any such curve.
-    final wobble = sqrt((_curveFitError(points, (p) => p.x) + _curveFitError(points, (p) => p.y)) / 2);
+    final wobble = sqrt(_bounceFitError(points));
 
     return pathLength / chord <= 1.25 &&
         downSteps / (points.length - 1) >= 0.75 &&
         maxOffset <= 0.02 + 0.08 * chord &&
         wobble <= 0.006 + 0.02 * chord;
   }
+
+  /// Mean squared error of the best fit of the path by a gentle curve, or by
+  /// two that meet at one point: a ball that bounces in view changes course
+  /// there (seen from behind the stumps it can even rise on screen after the
+  /// bounce), and each side of the bounce is smooth.
+  static double _bounceFitError(List<TrackPoint> points) {
+    double error(List<TrackPoint> ps) => (_curveFitError(ps, (p) => p.x) + _curveFitError(ps, (p) => p.y)) / 2;
+    var best = error(points);
+    // Each side needs four points, as a curve fits any three exactly.
+    for (var k = _minBouncePoints - 1; k <= points.length - _minBouncePoints; k++) {
+      final before = points.sublist(0, k + 1);
+      final after = points.sublist(k);
+      best = min(best, (error(before) * before.length + error(after) * after.length) / (before.length + after.length));
+    }
+    return best;
+  }
+
+  static const _minBouncePoints = 4;
 
   /// Mean squared error of the best quadratic fit of [coordinate] against time.
   static double _curveFitError(List<TrackPoint> points, double Function(TrackPoint) coordinate) {
