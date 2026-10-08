@@ -112,6 +112,14 @@ class PitchGeometry {
 
   double get releaseBottomY => farY + 0.05 * scale;
 
+  /// A ball bowled leaves the hand about 2 m up, nearly three times the
+  /// height of the stumps, so seen at the bowler's end it rises above this
+  /// line, one and a half stump heights over the bowling stumps' base. A
+  /// ball carried at waist height (walked down the pitch, or moved about
+  /// near the phone) stays below it: low down near the camera it shows on
+  /// screen where a ball released at the far end does, but never this high.
+  double get releaseHeightY => farY - _farStumpsHeight * scale * 1.5;
+
   /// A ball tracked past this line has left the bowler's end. The bowler's
   /// body never gets this far down the screen, so it confirms a real delivery.
   double get inFlightY => farY + 0.10 * scale;
@@ -124,14 +132,29 @@ class PitchGeometry {
 
   /// The region watched for the ball: the release corridor, then the air above
   /// the pitch widening toward the batsman.
+  ///
+  /// The pitch outline is where the ground is; a ball in the air near the
+  /// batsman is higher on screen than the ground beneath it, where the pitch
+  /// looks narrow, so a ball going wide there would leave the outline. The
+  /// watched width therefore reaches the full width of the batting end by
+  /// [batsmanZoneTopY].
   bool isWatched(double x, double y) {
-    if (y < releaseTopY || y > nearY + 0.05 * scale) return false;
-    final half = y < farY ? releaseHalfWidth : max(releaseHalfWidth, halfWidthAt(y) * 1.2);
+    if (y < releaseTopY) return isAboveReleaseZone(x, y);
+    if (y > nearY + 0.05 * scale) return false;
+    if (y < farY) return (x - centerXAt(y)).abs() <= releaseHalfWidth;
+    final towardBatsman = ((y - farY) / (batsmanZoneTopY - farY)).clamp(0.0, 1.0);
+    final airHalfWidth = releaseHalfWidth + (nearHalfWidth * 1.2 - releaseHalfWidth) * towardBatsman;
+    final half = max(airHalfWidth, halfWidthAt(y) * 1.2);
     return (x - centerXAt(y)).abs() <= half;
   }
 
   bool isReleaseZone(double x, double y) =>
       y >= releaseTopY && y <= releaseBottomY && (x - centerXAt(y)).abs() <= releaseHalfWidth;
+
+  /// The corridor above the release zone, higher than a bowler releases the
+  /// ball. A ball seen here first and dropping down the pitch was thrown in
+  /// from elsewhere (back from the batsman's end), not bowled.
+  bool isAboveReleaseZone(double x, double y) => y < releaseTopY && (x - centerXAt(y)).abs() <= releaseHalfWidth;
 
   bool isBatsmanZone(double y) => y >= batsmanZoneTopY;
 

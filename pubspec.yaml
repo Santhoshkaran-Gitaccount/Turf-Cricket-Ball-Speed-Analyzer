@@ -44,6 +44,9 @@ dependencies:
   ffi: ^2.2.0
   wakelock_plus: ^1.8.1
   sensors_plus: ^7.1.1
+  audioplayers: ^6.8.1
+  flutter_tts: ^4.2.5
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:
@@ -68,6 +71,7 @@ flutter:
     # Optional TensorFlow Lite ball model; see assets/models/README.md.
     - assets/models/
     - assets/icon/logo.png
+    - assets/sounds/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
@@ -115,13 +119,13 @@ flutter_launcher_icons:
   remove_alpha_ios: true
   min_sdk_android: 30
 
-# Splash screen, in the app theme's background colour (see BallSpeedApp.colorScheme).
+# Splash screen, in the app theme's background colour (see BallSpeedApp.colorScheme),
+# without a logo. Android 12+ always draws an icon, so it is given a transparent one.
 flutter_native_splash:
   color: "#10140F"
-  image: assets/icon/logo.png
   android_12:
     color: "#10140F"
-    image: assets/icon/app_icon_foreground.png
+    image: assets/icon/splash_blank.png
     icon_background_color: "#10140F"
   ios: true
   android: true

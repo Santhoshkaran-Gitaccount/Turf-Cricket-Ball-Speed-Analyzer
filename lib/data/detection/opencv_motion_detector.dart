@@ -1,5 +1,6 @@
 import 'dart:ffi' as ffi;
 import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:opencv_dart/opencv_dart.dart' as cv;
@@ -74,6 +75,36 @@ class OpenCvMotionDetector implements BallDetector {
   /// Slowly updated picture of the still scene, for removing ghosts.
   cv.Mat? _background;
 
+  /// The watched cells of the region, one byte per cell (non-zero = watched).
+  Uint8List _maskCells = Uint8List(0);
+
+  /// Native copies of the colour planes (one when U and V are interleaved).
+  ffi.Pointer<ffi.Uint8>? _uBuffer;
+  ffi.Pointer<ffi.Uint8>? _vBuffer;
+  int _uBufferBytes = 0;
+  int _vBufferBytes = 0;
+
+  /// Average colour (U and V) of each region cell in the still scene, as
+  /// float grid images; null until a frame with colour has been seen.
+  cv.Mat? _backgroundU;
+  cv.Mat? _backgroundV;
+
+  // Reused colour outputs.
+  final _chromaChannel = cv.Mat.empty();
+  final _chromaCells = cv.Mat.empty();
+  final _chromaU = cv.Mat.empty();
+  final _chromaV = cv.Mat.empty();
+  final _chromaDiffU = cv.Mat.empty();
+  final _chromaDiffV = cv.Mat.empty();
+  final _chromaDistance = cv.Mat.empty();
+  final _chromaMoved = cv.Mat.empty();
+
+  /// How far a cell's colour (|ΔU| + |ΔV|, 0–255 scale) must move from the
+  /// still scene to count as motion. A red ball on green turf, or a yellow
+  /// one, is far above this even where it is no brighter than the turf; a
+  /// shadow changes brightness, hardly colour.
+  static const _chromaThreshold = 18.0;
+
   /// Share of each new frame blended into [_background]: it follows about
   /// the last 20 frames.
   static const _backgroundRate = 0.05;
@@ -127,6 +158,7 @@ class OpenCvMotionDetector implements BallDetector {
         // The old background no longer matches the view; start a new one.
         _background?.dispose();
         _background = luma.clone();
+        _resetColourBackground();
         return const BallDetection(FrameStatus.cameraMoved);
       }
       final noiseFloor = cv.mean(_diff).val1 * _noiseMultiplier;
@@ -138,6 +170,12 @@ class OpenCvMotionDetector implements BallDetector {
       // Area pooling keeps a cell non-zero if any one of its pixels changed.
       cv.resize(_changed, _roiGridSize, dst: _pooled, interpolation: cv.INTER_AREA);
       cv.threshold(_pooled, 0, 255, cv.THRESH_BINARY, dst: _anyChanged);
+      // A cell whose colour moved away from the still scene is moving too,
+      // even if its brightness did not change enough.
+      if (_chromaChanged(frame.chroma, roi) case final colourMoved?) {
+        cv.bitwiseOR(_anyChanged, colourMoved, dst: _anyChanged);
+        colourMoved.dispose();
+      }
       cv.bitwiseAND(_anyChanged, _mask!, dst: _moving);
 
       final movingCells = cv.countNonZero(_moving);
@@ -166,6 +204,96 @@ class OpenCvMotionDetector implements BallDetector {
     // A ball crosses any one spot in a frame or two, so it barely enters the
     // background, while a bowler standing still or a slow change of light does.
     cv.addWeighted(background, 1 - _backgroundRate, luma, _backgroundRate, 0, dst: background);
+  }
+
+  /// Region cells whose average colour is far from the still scene's, as a
+  /// grid image like [_anyChanged], or null without colour (or on the first
+  /// frame with it, which starts the still scene). Each 4-pixel cell covers
+  /// 2 × 2 colour pixels, averaged by the same area resize as brightness. The
+  /// still scene follows each frame slowly, as the brightness background
+  /// does, so a ball leaves no trace behind it. All pixel work is native.
+  cv.Mat? _chromaChanged(ChromaPlanes? chroma, cv.Rect roi) {
+    if (chroma == null) return null;
+    final shared = identical(chroma.u, chroma.v);
+    final u = _cellColour(chroma, chroma.u, chroma.uOffset, roi, isV: false, dst: _chromaU);
+    final v = _cellColour(chroma, shared ? chroma.u : chroma.v, chroma.vOffset, roi, isV: shared, dst: _chromaV);
+    if (u == null || v == null) return null;
+
+    final backgroundU = _backgroundU;
+    final backgroundV = _backgroundV;
+    if (backgroundU == null || backgroundV == null || backgroundU.rows != u.rows || backgroundU.cols != u.cols) {
+      _resetColourBackground();
+      _backgroundU = u.clone();
+      _backgroundV = v.clone();
+      return null;
+    }
+
+    cv.absDiff(u, backgroundU, dst: _chromaDiffU);
+    cv.absDiff(v, backgroundV, dst: _chromaDiffV);
+    cv.add(_chromaDiffU, _chromaDiffV, dst: _chromaDistance);
+    // Its average over the region is the colour noise (grain in dim light);
+    // the threshold stays above it.
+    final noise = cv.mean(_chromaDistance, mask: _mask).val1 * _noiseMultiplier;
+    cv.threshold(_chromaDistance, max(_chromaThreshold, noise), 255, cv.THRESH_BINARY, dst: _chromaMoved);
+    cv.addWeighted(backgroundU, 1 - _backgroundRate, u, _backgroundRate, 0, dst: backgroundU);
+    cv.addWeighted(backgroundV, 1 - _backgroundRate, v, _backgroundRate, 0, dst: backgroundV);
+    return _chromaMoved.convertTo(cv.MatType.CV_8UC1);
+  }
+
+  /// One colour plane's average over each region cell, as a float grid image
+  /// written to [dst], or null if the plane is too small for the frame.
+  cv.Mat? _cellColour(ChromaPlanes chroma, Uint8List plane, int offset, cv.Rect roi,
+      {required bool isV, required cv.Mat dst}) {
+    final stride = chroma.pixelStride;
+    if (stride != 1 && stride != 2) return null;
+    final rows = roi.y ~/ 2 + roi.height ~/ 2;
+    final bytes = chroma.rowStride * (rows + 1);
+    if (plane.length < chroma.rowStride * (rows - 1)) return null;
+
+    // Copy into a native buffer kept for the plane.
+    final second = isV || (!identical(chroma.u, chroma.v) && identical(plane, chroma.v));
+    var buffer = second ? _vBuffer : _uBuffer;
+    if (buffer == null || (second ? _vBufferBytes : _uBufferBytes) < bytes) {
+      if (buffer != null) calloc.free(buffer);
+      buffer = calloc<ffi.Uint8>(bytes);
+      if (second) {
+        _vBuffer = buffer;
+        _vBufferBytes = bytes;
+      } else {
+        _uBuffer = buffer;
+        _uBufferBytes = bytes;
+      }
+    }
+    final length = min(plane.length, bytes);
+    buffer.asTypedList(bytes).setRange(0, length, plane);
+
+    // Interleaved values are a two-channel image; the plane's own value is
+    // channel [offset] (U at 0, V at 1 when they share a buffer).
+    final full = cv.Mat.fromBuffer(
+      rows,
+      chroma.rowStride ~/ stride,
+      stride == 1 ? cv.MatType.CV_8UC1 : cv.MatType.CV_8UC2,
+      buffer.cast(),
+    );
+    final region = full.region(cv.Rect(roi.x ~/ 2, roi.y ~/ 2, roi.width ~/ 2, roi.height ~/ 2));
+    try {
+      final single = stride == 1 ? region : cv.extractChannel(region, offset, dst: _chromaChannel);
+      cv.resize(single, _roiGridSize, dst: _chromaCells, interpolation: cv.INTER_AREA);
+      final cells = _chromaCells.convertTo(cv.MatType.CV_32FC1);
+      cells.copyTo(dst);
+      cells.dispose();
+      return dst;
+    } finally {
+      region.dispose();
+      full.dispose();
+    }
+  }
+
+  void _resetColourBackground() {
+    _backgroundU?.dispose();
+    _backgroundV?.dispose();
+    _backgroundU = null;
+    _backgroundV = null;
   }
 
   List<MotionBlob> _blobs(FrameLayout layout) {
@@ -228,9 +356,10 @@ class OpenCvMotionDetector implements BallDetector {
       _roiCellY = minY;
       _roiGridSize = (cols, rows);
       _roi = cv.Rect(minX * cellSize, minY * cellSize, cols * cellSize, rows * cellSize);
-      _mask = cv.Mat.fromList(rows, cols, cv.MatType.CV_8UC1, [
+      _maskCells = Uint8List.fromList([
         for (var gy = minY; gy <= maxY; gy++) ...mask.sublist(gy * gridW + minX, gy * gridW + maxX + 1),
       ]);
+      _mask = cv.Mat.fromList(rows, cols, cv.MatType.CV_8UC1, _maskCells);
       _watchedCells = mask.where((b) => b != 0).length;
     }
 
@@ -256,6 +385,7 @@ class OpenCvMotionDetector implements BallDetector {
     _previous = null;
     _background?.dispose();
     _background = null;
+    _resetColourBackground();
   }
 
   void _freeBuffers() {
@@ -265,6 +395,13 @@ class OpenCvMotionDetector implements BallDetector {
     }
     _buffers.clear();
     _bufferBytes = 0;
+    for (final buffer in [_uBuffer, _vBuffer]) {
+      if (buffer != null) calloc.free(buffer);
+    }
+    _uBuffer = null;
+    _vBuffer = null;
+    _uBufferBytes = 0;
+    _vBufferBytes = 0;
   }
 
   @override
@@ -273,7 +410,10 @@ class OpenCvMotionDetector implements BallDetector {
     _mask?.dispose();
     _mask = null;
     _layout = null;
-    for (final mat in [_small, _diff, _changed, _backgroundDiff, _foreground, _pooled, _anyChanged, _moving, _labels, _stats, _centroids]) {
+    for (final mat in [
+      _small, _diff, _changed, _backgroundDiff, _foreground, _pooled, _anyChanged, _moving, _labels, _stats, _centroids,
+      _chromaChannel, _chromaCells, _chromaU, _chromaV, _chromaDiffU, _chromaDiffV, _chromaDistance, _chromaMoved,
+    ]) {
       mat.dispose();
     }
   }

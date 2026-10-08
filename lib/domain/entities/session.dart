@@ -20,7 +20,7 @@ enum BallType {
 abstract final class PitchLength {
   /// Short enough for box cricket and small nets. Shorter still, a ball
   /// crosses in too few frames to be tracked, and quicker than 0.2 s is not counted.
-  static const double minMeters = 8;
+  static const double minMeters = 5;
   static const double maxMeters = 25;
 
   /// Preset lengths offered in session setup. 20.12 m is a full 22-yard pitch.

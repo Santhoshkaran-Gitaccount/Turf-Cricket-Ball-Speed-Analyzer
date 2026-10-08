@@ -9,6 +9,10 @@ enum InvalidReason {
   /// The ball was lost mid-pitch, or the camera moved during the delivery.
   trackingLost('Camera lost tracking'),
 
+  /// A ball was picked up and announced, but its path did not hold up as a
+  /// ball's. It was still bowled, so it takes a ball number.
+  ballLost('Lost the ball'),
+
   /// A second ball was moving down the pitch at the same time.
   multipleBalls('Multiple balls visible'),
 

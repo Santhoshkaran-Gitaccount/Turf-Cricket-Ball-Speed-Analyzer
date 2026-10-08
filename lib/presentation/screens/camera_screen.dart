@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -9,6 +10,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../core/formatters.dart';
 import '../../data/camera_settings_store.dart';
+import '../../domain/detection/frame.dart' show ChromaPlanes;
 import '../../domain/detection/view_transform.dart';
 import '../../domain/entities/session.dart';
 import '../tracking/tracking_controller.dart';
@@ -39,22 +41,32 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     (ResolutionPreset.medium, 60),
   ];
 
-  /// 60 FPS is the minimum for reliable detection.
-  static const _requiredFps = 60;
-
-  /// Minimum for tracking; slightly lower readings are measurement noise.
+  /// A camera setting delivering this much is kept; slightly lower readings
+  /// are measurement noise.
   static const _minFps = 55;
+
+  /// Below this the screen says the frame rate has dropped. Timing is fitted
+  /// over the whole flight, so speeds stay close at lower rates too; the line
+  /// only tells the user, it is not a fault.
+  static const _warnBelowFps = 45;
 
   /// While waiting for a delivery, exposure is unlocked this often so it
   /// follows the light (sun, clouds, floodlights), then locked again.
   static const _remeterInterval = Duration(seconds: 8);
   static const _remeterDuration = Duration(milliseconds: 800);
 
+  /// Exposure bias while tracking. A darker exposure makes the camera use a
+  /// shorter shutter time, so a fast ball is a sharp spot rather than a faint
+  /// streak; detection allows for a dimmer picture. Clamped to what the
+  /// camera supports.
+  static const _trackingExposureOffset = -1.0;
+
   /// Time autofocus is given to settle on the far stumps before it is locked.
   static const _focusSettleTime = Duration(milliseconds: 1500);
 
   CameraController? _camera;
   bool _openingCamera = false;
+  bool _restarting = false;
   DateTime? _focusSetAt;
   int? _requestedFps;
   Timer? _remeterTimer;
@@ -65,8 +77,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
   String? _error;
   double _screenAspect = 16 / 9;
 
-  /// The app is portrait; the rotate button turns this screen alone to
-  /// landscape, held with the top of the phone to the left.
+  /// The app is portrait, this screen included.
   bool _landscape = false;
 
   DeviceOrientation get _orientation =>
@@ -92,24 +103,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     if (_landscape) SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     _camera?.dispose();
     super.dispose();
-  }
-
-  Future<void> _toggleOrientation() async {
-    setState(() => _landscape = !_landscape);
-    await SystemChrome.setPreferredOrientations([_orientation]);
-    await _lockCamera();
-  }
-
-  /// Keeps the preview and frames upright for the chosen orientation, even if
-  /// the phone is tipped the other way.
-  Future<void> _lockCamera() async {
-    final camera = _camera;
-    if (camera == null || !camera.value.isInitialized) return;
-    try {
-      await camera.lockCaptureOrientation(_orientation);
-    } on CameraException {
-      // Preview follows the device instead; detection still uses [_orientation].
-    }
   }
 
   /// Waits (briefly) for the screen to finish turning to [orientation].
@@ -320,6 +313,13 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
       final remaining = _focusSettleTime - DateTime.now().difference(setAt);
       if (remaining > Duration.zero) await Future<void>.delayed(remaining);
     }
+    // A shorter shutter time, set before exposure is locked on it.
+    try {
+      final lowest = await camera.getMinExposureOffset();
+      await camera.setExposureOffset(max(lowest, _trackingExposureOffset));
+    } on CameraException {
+      // No exposure compensation on this device; the picture stays as it is.
+    }
     // Stop exposure and focus hunting mid-delivery; brightness changes look like motion.
     try {
       await camera.setExposureMode(ExposureMode.locked);
@@ -344,6 +344,12 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     if (camera == null || !camera.value.isStreamingImages) return;
     await camera.stopImageStream();
     try {
+      // Back to a normal picture for setting up.
+      await camera.setExposureOffset(0);
+    } on CameraException {
+      // See _startTracking.
+    }
+    try {
       await camera.setExposureMode(ExposureMode.auto);
       await camera.setFocusMode(FocusMode.auto);
     } on CameraException {
@@ -362,7 +368,28 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
       bytesPerRow: luma.bytesPerRow,
       rotationDegrees: _rotationDegrees(camera),
       screenAspect: _screenAspect,
+      chroma: _chroma(image),
     );
+  }
+
+  /// The frame's colour planes: separate U and V on Android, one interleaved
+  /// UV plane on iOS. Null if the camera gave something else.
+  static ChromaPlanes? _chroma(CameraImage image) {
+    final planes = image.planes;
+    if (planes.length >= 3) {
+      final u = planes[1];
+      return ChromaPlanes(
+        u: u.bytes,
+        v: planes[2].bytes,
+        rowStride: u.bytesPerRow,
+        pixelStride: u.bytesPerPixel ?? 1,
+      );
+    }
+    if (planes.length == 2) {
+      final uv = planes[1];
+      return ChromaPlanes(u: uv.bytes, v: uv.bytes, rowStride: uv.bytesPerRow, pixelStride: 2, vOffset: 1);
+    }
+    return null;
   }
 
   /// Clockwise rotation that makes sensor images upright for the locked
@@ -391,6 +418,23 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
       _focusSetAt = DateTime.now();
     } on CameraException {
       // Not supported on every device; the camera keeps focusing on its own.
+    }
+  }
+
+  /// Reopens the camera and detection when either got stuck, without leaving
+  /// the session: pitch length, ball type, stumps and deliveries are kept.
+  Future<void> _restart() async {
+    setState(() => _restarting = true);
+    try {
+      await _stopStream();
+      await _controller.restart();
+      final camera = _camera;
+      setState(() => _camera = null);
+      if (camera != null) await _disposeQuietly(camera);
+      if (!mounted) return;
+      await _initCamera();
+    } finally {
+      if (mounted) setState(() => _restarting = false);
     }
   }
 
@@ -510,16 +554,20 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     if (isTracking && !tracking.cameraSteady) return 'Camera is moving. Keep the phone still on a tripod.';
     if (tracking.notice case final message?) return message;
     final fps = tracking.measuredFps;
-    if (isTracking && fps != null && fps < _minFps) {
-      return 'Camera running at ${fps.round()} FPS. At least $_requiredFps FPS is needed for accurate speed.';
+    if (isTracking && fps != null && fps < _warnBelowFps) {
+      // Against what the camera delivered when it was opened, so a drop
+      // (dimmer light, a busy phone) is told apart from a camera that only
+      // ever runs this fast.
+      final now = fps.round();
+      final usual = _requestedFps;
+      if (usual != null && usual - now >= 3) return 'Camera running at $now FPS (down from $usual)';
+      return 'Camera running at $now FPS';
     }
     return null;
   }
 
-  /// Session info with the rotate button beside it, and any warning below.
+  /// Session info with the restart button beside it, and any warning below.
   Widget _buildTopBar(TrackingState tracking) {
-    // Turning mid-delivery would break tracking, so only while not tracking.
-    final canRotate = tracking.status != TrackingStatus.tracking;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       mainAxisSize: MainAxisSize.min,
@@ -532,9 +580,9 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
             ),
             const SizedBox(width: 8),
             IconButton.filledTonal(
-              onPressed: canRotate ? _toggleOrientation : null,
-              tooltip: _landscape ? 'Portrait' : 'Landscape',
-              icon: Icon(_landscape ? Icons.stay_current_portrait : Icons.stay_current_landscape),
+              onPressed: _restarting ? null : _restart,
+              tooltip: 'Restart camera and detection',
+              icon: const Icon(Icons.restart_alt),
             ),
           ],
         ),
@@ -557,7 +605,7 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _TrackingBadge(state: tracking),
+          _TrackingBadge(state: tracking, nextBallNumber: session.nextBallNumber),
           const SizedBox(height: 4),
           Flexible(
             child: Text(
@@ -690,15 +738,22 @@ class _Panel extends StatelessWidget {
 }
 
 class _TrackingBadge extends StatelessWidget {
-  const _TrackingBadge({required this.state});
+  const _TrackingBadge({required this.state, required this.nextBallNumber});
 
   final TrackingState state;
+
+  /// Number of the next ball to be saved; the one on the result card, if any.
+  final int nextBallNumber;
 
   @override
   Widget build(BuildContext context) {
     final (label, color) = switch (state.status) {
       TrackingStatus.idle => ('READY', Colors.white54),
       TrackingStatus.tracking when state.ballInFlight => ('BALL IN FLIGHT', Colors.yellowAccent),
+      // After the first ball, say which ball is next so it does not look as
+      // if the app started over.
+      TrackingStatus.tracking when state.pending != null => ('BALL #$nextBallNumber DONE', Colors.lightGreenAccent),
+      TrackingStatus.tracking when nextBallNumber > 1 => ('READY FOR BALL #$nextBallNumber', Colors.lightGreenAccent),
       TrackingStatus.tracking => ('WAITING FOR DELIVERY', Colors.redAccent),
       TrackingStatus.paused => ('PAUSED', Colors.amber),
     };

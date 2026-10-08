@@ -61,6 +61,68 @@ Uint8List syntheticPixels({
   return bytes;
 }
 
+/// How a camera lays out its colour planes.
+enum ChromaLayout {
+  /// Separate U and V planes, one byte per value.
+  planar,
+
+  /// Separate planes two bytes apart per value, as many Android cameras give
+  /// them (each plane is a view into one interleaved buffer).
+  androidInterleaved,
+
+  /// One plane of U, V pairs, as iOS gives it.
+  nv12,
+}
+
+/// Colour planes (U and V, half size) for a frame of [width] × [height]:
+/// neutral grey-green turf, with square "balls" of the given colour at
+/// normalized positions. A red ball is low U, high V.
+ChromaPlanes syntheticChroma({
+  int width = 640,
+  int height = 360,
+  List<(double, double)> balls = const [],
+  int ballU = 100,
+  int ballV = 200,
+  ChromaLayout layout = ChromaLayout.planar,
+}) {
+  final w = width ~/ 2, h = height ~/ 2;
+  final u = Uint8List(w * h)..fillRange(0, w * h, 120);
+  final v = Uint8List(w * h)..fillRange(0, w * h, 118);
+  final size = max(1, (4 * width / 640).round() ~/ 2);
+  for (final (x, y) in balls) {
+    final px = (x * w).round(), py = (y * h).round();
+    for (var dy = 0; dy < size; dy++) {
+      for (var dx = 0; dx < size; dx++) {
+        final row = py - size ~/ 2 + dy, col = px - size ~/ 2 + dx;
+        if (row >= 0 && row < h && col >= 0 && col < w) {
+          u[row * w + col] = ballU;
+          v[row * w + col] = ballV;
+        }
+      }
+    }
+  }
+  switch (layout) {
+    case ChromaLayout.planar:
+      return ChromaPlanes(u: u, v: v, rowStride: w, pixelStride: 1);
+    case ChromaLayout.androidInterleaved || ChromaLayout.nv12:
+      // V, U pairs (NV21) on Android; U, V pairs (NV12) on iOS.
+      final android = layout == ChromaLayout.androidInterleaved;
+      final pairs = Uint8List(w * h * 2);
+      for (var i = 0; i < w * h; i++) {
+        pairs[2 * i] = android ? v[i] : u[i];
+        pairs[2 * i + 1] = android ? u[i] : v[i];
+      }
+      if (!android) return ChromaPlanes(u: pairs, v: pairs, rowStride: 2 * w, pixelStride: 2, vOffset: 1);
+      // Each plane starts at its own first value and stops at its last one.
+      return ChromaPlanes(
+        u: Uint8List.sublistView(pairs, 1, pairs.length),
+        v: Uint8List.sublistView(pairs, 0, pairs.length - 1),
+        rowStride: 2 * w,
+        pixelStride: 2,
+      );
+  }
+}
+
 /// A fixed scene with detail in it (markings, kit bags, specks on the turf),
 /// seen from a camera whose view has moved [shiftX], [shiftY] pixels: the
 /// scene appears that far the other way, as when the phone is tilted or
@@ -137,8 +199,9 @@ class DetectorHarness {
   var _index = 0;
 
   /// [deviceMoving] is what the phone's gyroscope would say.
-  void frame(Uint8List bytes, {bool deviceMoving = false}) {
+  void frame(Uint8List bytes, {bool deviceMoving = false, ChromaPlanes? chroma}) {
     detector.process(LumaFrame(
+      chroma: chroma,
       bytes: bytes,
       width: width,
       height: height,

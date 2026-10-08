@@ -1,15 +1,16 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/formatters.dart';
 import '../../data/detection/detection_worker.dart';
+import '../../data/field_log.dart';
 import '../../domain/detection/delivery_detector.dart';
 import '../../domain/detection/pitch_geometry.dart';
 import '../../domain/entities/delivery.dart';
 import '../../domain/entities/session.dart';
+import '../../domain/entities/tracking.dart';
 import '../providers.dart';
 import 'tracking_state.dart';
 
@@ -35,10 +36,37 @@ class TrackingController extends Notifier<TrackingState> {
   final _clock = Stopwatch()..start();
   double? _processingMicrosAverage;
 
+  /// Per-second frame counts wobble by a few frames (frame timing, the odd
+  /// frame dropped while the detector is busy), so the shown rate is averaged
+  /// over a few seconds. The first second after starting is left out: the
+  /// camera is still settling, and it reads low.
+  int _fpsReadings = 0;
+
+  // Field diagnostics, written to the device log and a file on the phone (see
+  // FieldLog) in every build mode: what the camera delivers against what is
+  // processed, and what became of each ball picked up, with its path on screen.
+  int _cameraFrames = 0;
+  int _droppedAtLastLog = 0;
+  final List<TrackPoint> _loggedPath = [];
+
+  void _log(String message) => FieldLog.write(message);
+
+  String _pathSummary() {
+    final path = _loggedPath;
+    if (path.isEmpty) return 'no path';
+    final first = path.first;
+    final last = path.last;
+    final maxY = path.map((p) => p.y).reduce((a, b) => a > b ? a : b);
+    String at(TrackPoint p) => '(${p.x.toStringAsFixed(3)}, ${p.y.toStringAsFixed(3)})';
+    return 'points ${path.length}, ${(last.timeMicros - first.timeMicros) ~/ 1000} ms, '
+        'from ${at(first)} to ${at(last)}, lowest y ${maxY.toStringAsFixed(3)}';
+  }
+
   @override
   TrackingState build() {
     // Kept for as long as the session's camera screen is open.
     ref.watch(deviceMotionProvider);
+    ref.watch(soundPlayerProvider);
     ref.onDispose(() {
       _autoSaveTimer?.cancel();
       _noticeTimer?.cancel();
@@ -77,11 +105,15 @@ class TrackingController extends Notifier<TrackingState> {
       cameraSteady: true,
       measuredFps: null,
     );
+    _fpsReadings = 0;
+    _log('tracking started: pitch ${session.pitchLengthMeters} m, ball ${session.ballType.name}, '
+        'pitch ${state.pitch == null ? 'standard guide' : 'set from stumps'}');
   }
 
   void pause() {
     if (state.status != TrackingStatus.tracking) return;
     _worker?.reset();
+    _log('tracking paused');
     state = state.copyWith(
       status: TrackingStatus.paused,
       ballInFlight: false,
@@ -105,8 +137,10 @@ class TrackingController extends Notifier<TrackingState> {
     required int bytesPerRow,
     required int rotationDegrees,
     required double screenAspect,
+    ChromaPlanes? chroma,
   }) {
     if (state.status != TrackingStatus.tracking) return;
+    _cameraFrames++;
     _worker?.process(
       LumaFrame(
         bytes: bytes,
@@ -115,6 +149,7 @@ class TrackingController extends Notifier<TrackingState> {
         bytesPerRow: bytesPerRow,
         timestampMicros: _clock.elapsedMicroseconds,
         deviceMoving: ref.read(deviceMotionProvider).moving,
+        chroma: chroma,
       ),
       rotationDegrees: rotationDegrees,
       screenAspect: screenAspect,
@@ -136,6 +171,8 @@ class TrackingController extends Notifier<TrackingState> {
           return;
         }
         _worker?.setGeometry(pitch);
+        _log('pitch set: batting stumps base y ${pitch.nearY.toStringAsFixed(3)}, '
+            'bowling stumps base y ${pitch.farY.toStringAsFixed(3)}, scale ${pitch.scale.toStringAsFixed(2)}');
         state = state.copyWith(pitch: pitch, battingTap: null);
       case SetupStep.done:
         break;
@@ -162,6 +199,19 @@ class TrackingController extends Notifier<TrackingState> {
     state = state.copyWith(pending: null, pendingAt: null);
   }
 
+  /// Starts detection afresh after something got stuck, keeping the session
+  /// (pitch length, ball type, deliveries so far) and the stumps tapped: any
+  /// pending delivery is saved, the detection worker is shut down, and the
+  /// next start opens a new one.
+  Future<void> restart() async {
+    pause();
+    savePending();
+    final worker = _worker;
+    _worker = null;
+    await worker?.dispose();
+    _log('detection restarted');
+  }
+
   /// Stops detection, saves any pending delivery (the default) and closes the session.
   Future<void> end() async {
     pause();
@@ -180,8 +230,17 @@ class TrackingController extends Notifier<TrackingState> {
         state = state.copyWith(usingModel: usingModel);
         if (modelError != null) _showNotice('Ball model could not load; using motion detection');
       case FpsMeasured(:final fps):
+        final dropped = _worker?.droppedFrames ?? 0;
+        final processingMs = (_processingMicrosAverage ?? 0) / 1000;
+        _log('camera frames $_cameraFrames/s, processed ${fps.toStringAsFixed(1)}/s, '
+            'dropped ${dropped - _droppedAtLastLog}, processing ${processingMs.toStringAsFixed(1)} ms/frame');
+        _cameraFrames = 0;
+        _droppedAtLastLog = dropped;
+        if (_fpsReadings++ == 0) break;
+        final previous = state.measuredFps;
+        final smoothed = previous == null ? fps : previous * 0.7 + fps * 0.3;
         final processing = _processingMicrosAverage;
-        state = state.copyWith(measuredFps: fps, processingMs: processing == null ? null : processing / 1000);
+        state = state.copyWith(measuredFps: smoothed, processingMs: processing == null ? null : processing / 1000);
       case PitchVisibilityChanged(:final visible):
         state = state.copyWith(pitchVisible: visible);
       case FrameProcessed(:final processingMicros):
@@ -195,12 +254,29 @@ class TrackingController extends Notifier<TrackingState> {
 
   void _onDeliveryEvent(DeliveryEvent event) {
     switch (event) {
+      case ReleaseDetected(:final point):
+        _loggedPath
+          ..clear()
+          ..add(point);
+      case BallTravelling(:final point):
+        _loggedPath.add(point);
+      case DeliveryCompleted(:final measurement):
+        _log('COUNTED ${measurement.speedKmh} km/h, end ${measurement.end.name}, '
+            '${measurement.travelTime.inMilliseconds} ms; ${_pathSummary()}');
+      case TrackDiscarded(:final tooFast):
+        _log('DISCARDED${tooFast ? ' (too fast)' : ''}; ${_pathSummary()}');
+      case DeliveryInvalid(:final reason):
+        _log('INVALID ${reason.name}; ${_pathSummary()}');
+      case CameraSteadinessChanged(:final steady):
+        _log(steady ? 'camera steady' : 'camera MOVING');
+    }
+    switch (event) {
       case ReleaseDetected():
         state = state.copyWith(ballInFlight: true);
         // Told by sound too, so the bowler end knows the ball was picked up
         // without looking at the screen. No vibration: it would shake the camera.
         _showNotice('Ball detected');
-        unawaited(SystemSound.play(SystemSoundType.click));
+        ref.read(soundPlayerProvider).ballDetected();
       case BallTravelling():
         break;
       case DeliveryCompleted(:final measurement):
@@ -208,25 +284,34 @@ class TrackingController extends Notifier<TrackingState> {
         savePending();
         _autoSaveTimer = Timer(autoSaveDelay, savePending);
         state = state.copyWith(pending: measurement, pendingAt: DateTime.now(), ballInFlight: false);
-      case TrackDiscarded(:final tooFast):
-        // Not a ball after all; nothing is recorded. "Ball detected" was
-        // already shown, so say what became of it.
+        ref.read(soundPlayerProvider).say('${measurement.speedKmh} kilometres per hour');
+      case TrackDiscarded(tooFast: true):
+        // Faster than any bowler: not a ball, so nothing is recorded. "Ball
+        // detected" was already shown, so say what became of it.
         state = state.copyWith(ballInFlight: false);
         _showNotice(
-          tooFast
-              ? 'Not counted: too fast for ${formatPitchLength(session.pitchLengthMeters)}. Check the pitch length.'
-              : 'Not counted: lost the ball',
+          'Not counted: too fast for ${formatPitchLength(session.pitchLengthMeters)}. Check the pitch length.',
           duration: _resultNoticeDuration,
         );
+        ref.read(soundPlayerProvider).say('Not counted. Too fast');
+      case TrackDiscarded():
+        // It was announced as a ball, so it was bowled: like in a real over,
+        // it takes a ball number, as an invalid delivery.
+        _recordInvalid(InvalidReason.ballLost);
       case CameraSteadinessChanged(:final steady):
         state = state.copyWith(cameraSteady: steady);
       case DeliveryInvalid(:final reason):
-        // A valid ball still on its card came first, so it is numbered first.
-        savePending();
-        _persist(ref.read(recordInvalidDeliveryProvider)(session, reason));
-        state = state.copyWith(ballInFlight: false, revision: state.revision + 1);
-        _showNotice('Invalid delivery: ${reason.label}', duration: _resultNoticeDuration);
+        _recordInvalid(reason);
     }
+  }
+
+  void _recordInvalid(InvalidReason reason) {
+    // A valid ball still on its card came first, so it is numbered first.
+    savePending();
+    _persist(ref.read(recordInvalidDeliveryProvider)(session, reason));
+    state = state.copyWith(ballInFlight: false, revision: state.revision + 1);
+    _showNotice('Invalid delivery: ${reason.label}', duration: _resultNoticeDuration);
+    ref.read(soundPlayerProvider).say('Invalid. ${reason.label}');
   }
 
   /// Storage runs in the background; the session in memory drives the UI.

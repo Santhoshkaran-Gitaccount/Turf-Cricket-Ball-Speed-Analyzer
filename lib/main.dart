@@ -4,7 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive_ce_flutter/hive_ce_flutter.dart';
 
 import 'app.dart';
+import 'data/repositories/deferred_session_repository.dart';
 import 'data/repositories/hive_session_repository.dart';
+import 'domain/repositories/session_repository.dart';
 import 'presentation/providers.dart';
 
 Future<void> main() async {
@@ -12,12 +14,15 @@ Future<void> main() async {
 
   // The whole app is portrait only; the phone sits upright on a tripod
   // behind the keeper.
-  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  // Not awaited: the first screen should not wait on the platform.
+  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-  // Offline-first: everything is stored on the device with Hive.
-  await Hive.initFlutter();
-  final repository = await HiveSessionRepository.open();
+  // Offline-first: everything is stored on the device with Hive. Opening it
+  // reads every stored delivery, so it runs while the home screen shows.
+  final repository = DeferredSessionRepository(
+    Hive.initFlutter().then<SessionRepository>((_) => HiveSessionRepository.open()),
+  );
 
   runApp(
     ProviderScope(

@@ -70,8 +70,26 @@ class DetectionWorker {
       return false;
     }
     _inFlight++;
+    final chroma = frame.chroma;
+    // Interleaved colour (one plane holding both U and V) is sent once.
+    final sharedChroma = chroma != null && identical(chroma.u, chroma.v);
     _toWorker.send(_Frame(
-      TransferableTypedData.fromList([frame.bytes]),
+      TransferableTypedData.fromList([
+        frame.bytes,
+        if (chroma != null) chroma.u,
+        if (chroma != null && !sharedChroma) chroma.v,
+      ]),
+      frame.bytes.length,
+      chroma == null
+          ? null
+          : (
+              uLength: chroma.u.length,
+              vLength: sharedChroma ? 0 : chroma.v.length,
+              rowStride: chroma.rowStride,
+              pixelStride: chroma.pixelStride,
+              uOffset: chroma.uOffset,
+              vOffset: chroma.vOffset,
+            ),
       frame.width,
       frame.height,
       frame.bytesPerRow,
@@ -98,9 +116,15 @@ class DetectionWorker {
   }
 }
 
+/// How the colour planes follow the brightness plane in a [_Frame]'s bytes.
+/// A [vLength] of 0 means V is in the U plane (interleaved).
+typedef _ChromaLayout = ({int uLength, int vLength, int rowStride, int pixelStride, int uOffset, int vOffset});
+
 class _Frame {
   const _Frame(
     this.bytes,
+    this.lumaLength,
+    this.chroma,
     this.width,
     this.height,
     this.bytesPerRow,
@@ -110,7 +134,10 @@ class _Frame {
     this.deviceMoving,
   );
 
+  /// The brightness plane, then the colour planes if [chroma] is set.
   final TransferableTypedData bytes;
+  final int lumaLength;
+  final _ChromaLayout? chroma;
   final int width;
   final int height;
   final int bytesPerRow;
@@ -135,6 +162,33 @@ class _Stop {
 
 class _Stopped {
   const _Stopped();
+}
+
+/// The frame [message] carries, its planes viewed in place in the received bytes.
+LumaFrame _unpack(_Frame message) {
+  final buffer = message.bytes.materialize();
+  final luma = buffer.asUint8List(0, message.lumaLength);
+  ChromaPlanes? chroma;
+  if (message.chroma case final layout?) {
+    final u = buffer.asUint8List(message.lumaLength, layout.uLength);
+    chroma = ChromaPlanes(
+      u: u,
+      v: layout.vLength == 0 ? u : buffer.asUint8List(message.lumaLength + layout.uLength, layout.vLength),
+      rowStride: layout.rowStride,
+      pixelStride: layout.pixelStride,
+      uOffset: layout.uOffset,
+      vOffset: layout.vOffset,
+    );
+  }
+  return LumaFrame(
+    bytes: luma,
+    width: message.width,
+    height: message.height,
+    bytesPerRow: message.bytesPerRow,
+    timestampMicros: message.timestampMicros,
+    deviceMoving: message.deviceMoving,
+    chroma: chroma,
+  );
 }
 
 void _run((SendPort, DetectorConfig) args) {
@@ -162,14 +216,7 @@ void _run((SendPort, DetectorConfig) args) {
           detector
             ..rotationDegrees = message.rotationDegrees
             ..screenAspect = message.screenAspect
-            ..process(LumaFrame(
-              bytes: message.bytes.materialize().asUint8List(),
-              width: message.width,
-              height: message.height,
-              bytesPerRow: message.bytesPerRow,
-              timestampMicros: message.timestampMicros,
-              deviceMoving: message.deviceMoving,
-            ));
+            ..process(_unpack(message));
         } catch (error, stack) {
           // One bad frame must not stop detection.
           debugPrint('Frame processing failed: $error\n$stack');

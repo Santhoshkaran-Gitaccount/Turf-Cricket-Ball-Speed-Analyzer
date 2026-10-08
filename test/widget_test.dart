@@ -35,7 +35,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Enter a session name'), findsOneWidget);
-    expect(find.text('Must be between 8 and 25 meters'), findsOneWidget);
+    expect(find.text('Must be between 5 and 25 meters'), findsOneWidget);
   });
 
   testWidgets('Session setup fits a portrait phone screen without scrolling', (tester) async {

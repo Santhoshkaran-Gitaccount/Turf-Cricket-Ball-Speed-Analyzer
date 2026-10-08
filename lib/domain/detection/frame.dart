@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'pitch_geometry.dart';
 import 'view_transform.dart';
 
-/// The brightness (Y) plane of one camera frame.
+/// The brightness (Y) plane of one camera frame, and its colour if known.
 class LumaFrame {
   const LumaFrame({
     required this.bytes,
@@ -12,6 +12,7 @@ class LumaFrame {
     required this.bytesPerRow,
     required this.timestampMicros,
     this.deviceMoving = false,
+    this.chroma,
   });
 
   final Uint8List bytes;
@@ -22,6 +23,36 @@ class LumaFrame {
 
   /// The phone's motion sensors say it was turning when the frame was taken.
   final bool deviceMoving;
+
+  /// The frame's colour, at half its width and height. Without it the ball
+  /// is found by brightness alone.
+  final ChromaPlanes? chroma;
+}
+
+/// The two colour planes (U and V, or Cb and Cr) of a YUV 4:2:0 frame, each
+/// half the frame's width and height. A red ball on green turf can be as
+/// bright as the turf, but its colour is far from it.
+///
+/// The value for chroma pixel (x, y) is at `offset + y * rowStride + x *
+/// pixelStride` in its plane. Planes may be separate (Android's three-plane
+/// YUV, pixel stride 1 or 2) or the same interleaved buffer (NV12, as iOS
+/// gives it: U at offset 0, V at offset 1, pixel stride 2).
+class ChromaPlanes {
+  const ChromaPlanes({
+    required this.u,
+    required this.v,
+    required this.rowStride,
+    required this.pixelStride,
+    this.uOffset = 0,
+    this.vOffset = 0,
+  });
+
+  final Uint8List u;
+  final Uint8List v;
+  final int rowStride;
+  final int pixelStride;
+  final int uOffset;
+  final int vOffset;
 }
 
 /// Whether a frame could be used to look for the ball.

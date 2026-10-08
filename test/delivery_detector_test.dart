@@ -16,6 +16,15 @@ DetectorHarness _harness({int fps = 120, BallType ballType = BallType.tennis, in
   return h;
 }
 
+/// One frame with the ball [x] m right of the pitch centre line, [height] m
+/// up and [z] m in front of a camera 1 m high, 2 m behind the batting stumps,
+/// matching [PitchGeometry.standard].
+void _ballAt(DetectorHarness h, double x, double height, double z) {
+  final sx = 0.5 + 0.30 * (x / 1.5) * (2 / z);
+  final sy = 0.290 + 1.3207 * (1 - height) / z;
+  h.frame(syntheticPixels(balls: [if (sx > 0 && sx < 1 && sy > 0 && sy < 1) (sx, sy)]));
+}
+
 void main() {
   group('speed calculation', () {
     test('matches the spec example: 20.12 m in 0.55 s is 132 km/h', () {
@@ -151,6 +160,19 @@ void main() {
       expect(h.events.whereType<ReleaseDetected>(), isEmpty);
     });
 
+    test('a second ball bowled straight after the first is measured too', () {
+      final h = _harness();
+      h.empty(5);
+      h.ball(0.22, 0.93, 60);
+      // Released half a second after the first reached the stumps.
+      h.empty(60);
+      h.ball(0.22, 0.93, 70);
+      h.empty(5);
+
+      expect(h.invalid, isEmpty);
+      expect(h.deliveries, hasLength(2));
+    });
+
     test('counts consecutive deliveries separately', () {
       final h = _harness();
       h.empty(5);
@@ -162,6 +184,119 @@ void main() {
       expect(h.deliveries, hasLength(2));
       expect(h.deliveries[1].speedKmh, lessThan(h.deliveries[0].speedKmh));
     });
+
+    // Bowled at 120 km/h from 1.2 m in front of the bowling stumps, bouncing
+    // and rising to stump height. In the air near the batsman the ball is high
+    // on screen, beside the narrow far part of the pitch outline.
+    for (final (name, startX, endX, releaseHeight) in [
+      ('down the middle', 0.0, 0.0, 2.0),
+      ('going wide on the right', 0.0, 1.0, 2.0),
+      ('going wide on the left', 0.0, -1.0, 2.0),
+      ('at the right edge of the pitch', 0.0, 1.5, 2.0),
+      ('round the wicket to the left edge', 0.8, -1.5, 2.0),
+      ('from a tall bowler with a high release', 0.0, 0.0, 2.6),
+    ]) {
+      test('measures a ball $name', () {
+        final h = _harness(fps: 60);
+        h.empty(70);
+        const pitch = 20.12;
+        const v = 120 / 3.6;
+        const releaseZ = 2 + pitch - 1.2;
+        const bounceZ = 2 + 6.0;
+        const endZ = 0.6;
+        final frames = ((releaseZ - endZ) / v * 60).round();
+        for (var i = 0; i <= frames; i++) {
+          final z = releaseZ - v * i / 60;
+          final x = startX + (endX - startX) * (releaseZ - z) / (releaseZ - endZ);
+          final height = z >= bounceZ
+              ? releaseHeight * (z - bounceZ) / (releaseZ - bounceZ)
+              : 0.8 * (bounceZ - z) / (bounceZ - endZ);
+          _ballAt(h, x, height, z);
+        }
+        h.empty(30);
+
+        expect(h.events.whereType<TrackDiscarded>(), isEmpty);
+        expect(h.invalid, isEmpty);
+        expect(h.deliveries.single.speedKmh, closeTo(120, 10));
+      });
+    }
+
+    // Low frame rates come with dim light; the timing is fitted against frame
+    // numbers, so the bounce and the ball rising near the batsman do not
+    // skew it however few frames there are.
+    for (final fps in [20, 30, 60]) {
+      test('measures a bouncing ball at $fps FPS', () {
+        final h = _harness(fps: fps);
+        h.empty(fps + fps ~/ 6);
+        const v = 120 / 3.6;
+        const releaseZ = 2 + 20.12 - 1.2;
+        const bounceZ = 2 + 6.0;
+        const endZ = 0.6;
+        final frames = ((releaseZ - endZ) / v * fps).round();
+        for (var i = 0; i <= frames; i++) {
+          final z = releaseZ - v * i / fps;
+          final height = z >= bounceZ ? 2.0 * (z - bounceZ) / (releaseZ - bounceZ) : 0.8 * (bounceZ - z) / (bounceZ - endZ);
+          _ballAt(h, 0, height, z);
+        }
+        h.empty(fps);
+
+        expect(h.deliveries.single.speedKmh, closeTo(120, 13));
+      });
+    }
+
+    // Walked towards the phone with the ball in hand at waist height, as when
+    // fetching it: low down near the camera it shows where a ball released at
+    // the far end does, and moves down the screen fast.
+    for (final (kmh, startZ) in [(5.0, 21.0), (8.0, 8.0)]) {
+      test('a ball carried at $kmh km/h from ${startZ.round()} m is not a delivery', () {
+        final h = _harness(fps: 30);
+        h.empty(40);
+        final v = kmh / 3.6;
+        for (var i = 0; startZ - v * i / 30 > 0.8; i++) {
+          // Bobbing a little with each step.
+          final height = 0.85 + (i % 15 < 8 ? 0.03 : -0.03);
+          _ballAt(h, 0.3, height, startZ - v * i / 30);
+        }
+        h.empty(30);
+
+        expect(h.events.whereType<ReleaseDetected>(), isEmpty);
+        expect(h.events.whereType<TrackDiscarded>(), isEmpty);
+        expect(h.invalid, isEmpty);
+        expect(h.deliveries, isEmpty);
+      });
+    }
+
+    // Thrown back from the batting crease towards the bowler in an arc that
+    // lands a few metres down the pitch and bounces on: seen from behind the
+    // batting stumps it drops down the screen past the bowler's end, like a
+    // ball just bowled.
+    for (final (landing, flight) in [(4.0, 0.6), (4.0, 1.5), (6.0, 1.0)]) {
+      test('a ball thrown back landing $landing m down the pitch is not a delivery', () {
+        final h = _harness(fps: 60);
+        h.empty(70);
+        const startZ = 3.0;
+        const startHeight = 1.5;
+        final landZ = 2 + landing;
+        final vz = (landZ - startZ) / flight;
+        final vy = (4.9 * flight * flight - startHeight) / flight;
+        for (var i = 0; i <= (flight * 60).round() + 40; i++) {
+          final t = i / 60;
+          if (t <= flight) {
+            _ballAt(h, 0, startHeight + vy * t - 4.9 * t * t, startZ + vz * t);
+          } else {
+            final tb = t - flight;
+            final up = vy.abs() * 0.4;
+            _ballAt(h, 0, max(0.0, up * tb - 4.9 * tb * tb), landZ + vz * 0.6 * tb);
+          }
+        }
+        h.empty(30);
+
+        expect(h.events.whereType<ReleaseDetected>(), isEmpty);
+        expect(h.events.whereType<TrackDiscarded>(), isEmpty);
+        expect(h.invalid, isEmpty);
+        expect(h.deliveries, isEmpty);
+      });
+    }
   });
 
   group('occlusion', () {
@@ -176,6 +311,17 @@ void main() {
       expect(h.deliveries, hasLength(1));
       expect(h.deliveries.single.travelTime.inMilliseconds, closeTo(500, 40));
     });
+
+    test('keeps tracking a ball covered for a fifth of a second down the pitch', () {
+      final h = _harness(fps: 60);
+      h.empty(5);
+      // 0.65 s flight, hidden for 12 frames (0.2 s) before the batsman's end.
+      h.ball(0.22, 0.62, 39, hidden: {for (var i = 14; i < 26; i++) i});
+      h.empty(20);
+
+      expect(h.invalid, isEmpty);
+      expect(h.deliveries, hasLength(1));
+    });
   });
 
   group('invalid deliveries', () {
@@ -183,7 +329,8 @@ void main() {
       final h = _harness();
       h.empty(5);
       h.ball(0.22, 0.46, 40);
-      h.empty(20);
+      // Longer than a ball is waited for down the pitch (0.25 s).
+      h.empty(40);
 
       expect(h.events.whereType<ReleaseDetected>(), hasLength(1));
       expect(h.invalid, [InvalidReason.trackingLost]);
@@ -247,13 +394,62 @@ void main() {
       expect(h.events.whereType<TrackDiscarded>().single.tooFast, isTrue);
     });
 
-    test('duration out of range for a delivery that takes too long', () {
-      final h = _harness();
+    test('a slow delivery well above 3 km/h is still counted', () {
+      final h = _harness(fps: 30);
       h.empty(5);
-      h.ball(0.22, 0.62, 400); // 3.3 s
+      h.ball(0.22, 0.62, 100); // 3.3 s, about 22 km/h on 20.12 m
       h.empty(20);
 
-      expect(h.invalid, [InvalidReason.durationOutOfRange]);
+      expect(h.invalid, isEmpty);
+      expect(h.deliveries, hasLength(1));
+    });
+  });
+
+  group('colour', () {
+    // A red leather ball as bright as the turf: no brightness change to see.
+    void bowlRedBall(DetectorHarness h, {required bool withColour, ChromaLayout layout = ChromaLayout.planar}) {
+      h.empty(5);
+      for (var i = 0; i <= 60; i++) {
+        final balls = [(0.5, 0.22 + 0.40 * i / 60)];
+        h.frame(
+          syntheticPixels(balls: balls, ballLuma: background),
+          chroma: withColour ? syntheticChroma(balls: balls, layout: layout) : null,
+        );
+      }
+      for (var i = 0; i < 20; i++) {
+        h.frame(syntheticPixels(), chroma: withColour ? syntheticChroma(layout: layout) : null);
+      }
+    }
+
+    for (final layout in ChromaLayout.values) {
+      test('a ball as bright as the turf is found by its colour (${layout.name})', () {
+        final h = _harness(fps: 120, ballType: BallType.leather);
+        bowlRedBall(h, withColour: true, layout: layout);
+
+        expect(h.invalid, isEmpty);
+        expect(h.deliveries, hasLength(1));
+        expect(h.deliveries.single.speedKmh, closeTo(145, 6));
+      });
+    }
+
+    test('without colour the same ball is not seen at all', () {
+      final h = _harness(fps: 120, ballType: BallType.leather);
+      bowlRedBall(h, withColour: false);
+
+      expect(h.events.whereType<ReleaseDetected>(), isEmpty);
+    });
+
+    test('a shadow passing changes brightness, not colour, and is still not a ball', () {
+      final h = _harness(fps: 60);
+      h.empty(5);
+      // Something large and dark crossing the pitch, colour unchanged.
+      for (var i = 0; i <= 30; i++) {
+        h.frame(syntheticPixels(people: [(0.2 + 0.6 * i / 30, 0.5, 0.15, 0.3)]), chroma: syntheticChroma());
+      }
+      h.empty(20);
+
+      expect(h.events.whereType<ReleaseDetected>(), isEmpty);
+      expect(h.deliveries, isEmpty);
     });
   });
 

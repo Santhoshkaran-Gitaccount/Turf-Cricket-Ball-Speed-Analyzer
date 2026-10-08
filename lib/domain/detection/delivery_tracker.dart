@@ -54,16 +54,25 @@ class CameraSteadinessChanged extends DeliveryEvent {
 }
 
 class _Track {
-  _Track(TrackPoint first) : points = [first], maxY = first.y;
+  _Track(TrackPoint first, {this.fromAbove = false}) : points = [first], maxY = first.y, minY = first.y;
 
   final List<TrackPoint> points;
   double maxY;
+
+  /// Highest point on screen.
+  double minY;
+
+  /// First seen above the release zone, higher than a bowler can release the
+  /// ball: one thrown back from the batsman's end and dropping in. It is
+  /// followed only so it is not taken for a new ball, and is never released.
+  final bool fromAbove;
 
   TrackPoint get last => points.last;
 
   void add(TrackPoint point) {
     points.add(point);
     maxY = max(maxY, point.y);
+    minY = min(minY, point.y);
   }
 }
 
@@ -96,17 +105,31 @@ class DeliveryTracker {
   /// Lower bound for the occlusion gap, so a jittery high frame rate does not
   /// make it too short.
   static const _minGapMicros = 60000;
+
+  /// How long a ball on its way down the pitch may go unseen and still be
+  /// followed: long enough for a hand, a fielder or a patch of shadow to
+  /// cover it for a moment. Candidates seen only a frame or two keep the
+  /// shorter gap, so a stale one does not pick up something else.
+  static const _minFlightGapMicros = 250000;
   static const _minPointsInFlight = 4;
   static const _maxCandidates = 12;
   static const _maxSeedArea = 30;
   static const _maxBallArea = 150;
-  static const _cooldownAfterDeliveryMicros = 1500000;
-  /// As long as after a valid delivery: the same ball bouncing on, rolling or
-  /// being picked up must not be taken for further deliveries.
+  /// A delivery ends at the batsman's end, and a new one can only start in
+  /// the release zone at the far end moving down the pitch, which the ball
+  /// just bowled bouncing on, rolling or being picked up never does (one
+  /// thrown back drops in from above the release zone and is ignored). So
+  /// the next ball is looked for almost at once.
+  static const _cooldownAfterDeliveryMicros = 300000;
+
+  /// An invalid delivery may have ended anywhere down the pitch, and the same
+  /// ball can come into view again further on; it must not be taken for
+  /// further deliveries.
   static const _cooldownAfterInvalidMicros = 1500000;
   static const _minTravelMicros = 200000;
-  static const _maxTravelMicros = 3000000;
-  static const _minKmh = 15;
+  /// Long enough for the slowest allowed ball ([_minKmh]) on the longest pitch (25 m).
+  static const _maxTravelMicros = 30000000;
+  static const _minKmh = 3;
 
   /// A little above the fastest ball ever recorded (161.3 km/h).
   static const _maxKmh = 165;
@@ -148,7 +171,9 @@ class DeliveryTracker {
   static const _inFlightAreaGrowth = 4;
 
   /// The ball must be seen in at least this share of its frames in flight.
-  static const _minDetectionRate = 0.5;
+  /// A fast ball blurs in some frames and is missed there, so a little over
+  /// a third is enough; a path seen less often than that is too patchy to time.
+  static const _minDetectionRate = 0.35;
 
   final List<_Track> _candidates = [];
   _Track? _ball;
@@ -173,6 +198,10 @@ class DeliveryTracker {
   /// How long a track can go unseen before it is treated as lost.
   int get _maxGapMicros =>
       max(_minGapMicros, (_frameIntervalMicros * (_maxOccludedFrames + 1)).round());
+
+  /// How long the released ball can go unseen down the pitch before it is
+  /// treated as lost.
+  int get _maxFlightGapMicros => max(_minFlightGapMicros, _maxGapMicros);
 
   void reset() {
     _candidates.clear();
@@ -254,8 +283,13 @@ class DeliveryTracker {
         }
       } else {
         _framesSinceSeen++;
-        if (timeMicros - ball.last.timeMicros > _maxGapMicros) {
-          if (geometry.isBatsmanZone(ball.maxY)) {
+        final unseen = timeMicros - ball.last.timeMicros;
+        // At the batsman's end the ball is expected to vanish (bat, pads,
+        // keeper, past the camera), so the delivery ends as soon as it has.
+        // Down the pitch it is waited for a little longer.
+        final atBatsman = geometry.isBatsmanZone(ball.maxY);
+        if (unseen > (atBatsman ? _maxGapMicros : _maxFlightGapMicros)) {
+          if (atBatsman) {
             _complete(ball, DeliveryEnd.batsmanArea);
           } else {
             _invalid(InvalidReason.trackingLost, timeMicros);
@@ -274,7 +308,11 @@ class DeliveryTracker {
       track.add(TrackPoint(timeMicros, match.x, match.y));
 
       if (track.points.length >= _minPointsInFlight && track.last.y >= geometry.inFlightY) {
-        if (!_movesLikeBall(track.points)) {
+        // Never as high as a bowler's hand: a ball carried, not bowled. With a
+        // ball already in flight, anything else coming down like a ball spoils
+        // the measurement however high it was first seen.
+        final carried = _ball == null && track.minY > geometry.releaseHeightY;
+        if (track.fromAbove || carried || !_movesLikeBall(track.points)) {
           _candidates.remove(track);
           break;
         }
@@ -288,17 +326,23 @@ class DeliveryTracker {
       }
     }
 
-    _candidates.removeWhere((t) => timeMicros - t.last.timeMicros > _maxGapMicros);
+    // A candidate already followed for a few frames is most likely the ball
+    // on its way down the pitch, and is waited for as long as a released one.
+    _candidates.removeWhere((t) =>
+        timeMicros - t.last.timeMicros >
+        (t.points.length >= _minPointsInFlight ? _maxFlightGapMicros : _maxGapMicros));
 
     if (noisy) return;
     for (final blob in unused) {
-      if (blob.area > _maxSeedArea || !geometry.isReleaseZone(blob.x, blob.y)) continue;
+      if (blob.area > _maxSeedArea) continue;
+      final fromAbove = geometry.isAboveReleaseZone(blob.x, blob.y);
+      if (!fromAbove && !geometry.isReleaseZone(blob.x, blob.y)) continue;
       if (_candidates.length >= _maxCandidates) {
         // Make room by dropping the candidate that has made the least progress.
         _candidates.sort((a, b) => b.maxY.compareTo(a.maxY));
         _candidates.removeLast();
       }
-      _candidates.add(_Track(TrackPoint(timeMicros, blob.x, blob.y)));
+      _candidates.add(_Track(TrackPoint(timeMicros, blob.x, blob.y), fromAbove: fromAbove));
     }
   }
 
@@ -419,43 +463,69 @@ class DeliveryTracker {
   /// Release-to-finish time in microseconds.
   ///
   /// Each frame's time is when the phone handed it over, which wobbles by a
-  /// few milliseconds; a smooth fit of time against position down the screen
-  /// through every tracked point averages that out. A ball that reached the
-  /// stumps is timed where the fit crosses the stumps line, between frames,
-  /// rather than at the first frame after it.
+  /// few milliseconds, while the camera itself captures at a steady rate. A
+  /// straight-line fit of time against frame number through every tracked
+  /// point recovers that steady clock; frames the ball was not seen in are
+  /// counted from the gaps. Unlike a fit against position on screen, it holds
+  /// however the ball moves there (bouncing, rising near the batsman), so it
+  /// is just as right at 20 FPS as at 120. A ball that reached the stumps is
+  /// timed where it crossed the stumps line, between the last two frames.
   int _travelMicros(List<TrackPoint> points, DeliveryEnd end) {
     final first = points.first;
     final last = points.last;
     final raw = last.timeMicros - first.timeMicros;
-    final span = last.y - first.y;
-    if (points.length < 5 || span <= 0) return raw;
+    if (points.length < 3) return raw;
 
-    // Normal equations for t = c0 + c1·u + c2·u², with u the position scaled to 0–1.
-    final m = List.generate(3, (_) => List.filled(3, 0.0));
-    final v = List.filled(3, 0.0);
-    for (final p in points) {
-      final u = (p.y - first.y) / span;
-      final powers = [1.0, u, u * u];
-      final t = (p.timeMicros - first.timeMicros).toDouble();
-      for (var r = 0; r < 3; r++) {
-        for (var c = 0; c < 3; c++) {
-          m[r][c] += powers[r] * powers[c];
-        }
-        v[r] += powers[r] * t;
+    // Frame numbers are counted from the first point, each at least one past
+    // the one before; counting gap by gap would let two wobbles in a row
+    // skip or merge a frame. The interval starts as the typical step between
+    // points (most are consecutive frames), is refined from the fit, and the
+    // frames are counted again.
+    final n = points.length;
+    final steps = [for (var i = 1; i < n; i++) points[i].timeMicros - points[i - 1].timeMicros]..sort();
+    var interval = steps[steps.length ~/ 2].toDouble();
+    if (interval <= 0) return raw;
+    var frameNumbers = <int>[];
+    var a = 0.0, b = interval;
+    for (var pass = 0; pass < 2; pass++) {
+      frameNumbers = [0];
+      for (var i = 1; i < n; i++) {
+        final k = ((points[i].timeMicros - first.timeMicros) / interval).round();
+        frameNumbers.add(max(frameNumbers.last + 1, k));
+      }
+
+      // Least-squares line t = a + b·k.
+      var sumK = 0.0, sumT = 0.0, sumKK = 0.0, sumKT = 0.0;
+      for (var i = 0; i < n; i++) {
+        final k = frameNumbers[i].toDouble();
+        final t = (points[i].timeMicros - first.timeMicros).toDouble();
+        sumK += k;
+        sumT += t;
+        sumKK += k * k;
+        sumKT += k * t;
+      }
+      final denominator = n * sumKK - sumK * sumK;
+      if (denominator == 0) return raw;
+      b = (n * sumKT - sumK * sumT) / denominator;
+      a = (sumT - b * sumK) / n;
+      if (b <= 0) return raw;
+      interval = b;
+    }
+    double timeAt(int i) => a + b * frameNumbers[i];
+
+    var finish = timeAt(n - 1);
+    if (end == DeliveryEnd.stumps) {
+      final before = points[n - 2];
+      final dy = last.y - before.y;
+      if (dy > 0) {
+        final fraction = ((geometry.stumpsLineY - before.y) / dy).clamp(0.0, 1.0);
+        finish = timeAt(n - 2) + fraction * (timeAt(n - 1) - timeAt(n - 2));
       }
     }
-    final c = _solve3(m, v);
-    if (c == null) return raw;
-    double timeAt(double y) {
-      final u = (y - first.y) / span;
-      return c[0] + c[1] * u + c[2] * u * u;
-    }
-
-    final endY = end == DeliveryEnd.stumps ? geometry.stumpsLineY : last.y;
-    final fitted = timeAt(endY) - timeAt(first.y);
-    // The fit only refines the timing; if it disagrees with the frames by
-    // more than a couple of frames, the path is unusual and the frames win.
-    if (fitted <= 0 || (fitted - raw).abs() > 2 * _frameIntervalMicros) return raw;
+    final fitted = finish - timeAt(0);
+    // The fit only smooths the timing; if it disagrees with the frames by
+    // more than a couple of frames, the timing is unusual and the frames win.
+    if (fitted <= 0 || (fitted - raw).abs() > 2 * interval) return raw;
     return fitted.round();
   }
 
@@ -506,15 +576,24 @@ class DeliveryTracker {
 
     var pathLength = 0.0;
     var downSteps = 0;
-    var maxOffset = 0.0;
     for (var i = 1; i < points.length; i++) {
       final dx = points[i].x - points[i - 1].x;
       final dy = points[i].y - points[i - 1].y;
       pathLength += sqrt(dx * dx + dy * dy);
       if (dy >= -0.002) downSteps++;
-      // Distance from the straight line between the first and last points.
-      final offset = ((points[i].x - first.x) * chordY - (points[i].y - first.y) * chordX).abs() / chord;
-      maxOffset = max(maxOffset, offset);
+    }
+
+    // Distance from the straight line between the first and last points, or,
+    // for a ball that bounces in view and changes course (sideways, for one
+    // going wide), from two straight lines that meet at the bounce.
+    var maxOffset = _maxOffset(points, 0, points.length - 1);
+    var straightLength = chord;
+    for (var k = _minBouncePoints - 1; k <= points.length - _minBouncePoints; k++) {
+      final offset = max(_maxOffset(points, 0, k), _maxOffset(points, k, points.length - 1));
+      if (offset < maxOffset) {
+        maxOffset = offset;
+        straightLength = _distance(first, points[k]) + _distance(points[k], last);
+      }
     }
 
     // On screen a ball moves smoothly over time, speeding up gradually as it
@@ -522,10 +601,26 @@ class DeliveryTracker {
     // chained together jump back and forth around any such curve.
     final wobble = sqrt(_bounceFitError(points));
 
-    return pathLength / chord <= 1.25 &&
+    return pathLength / straightLength <= 1.25 &&
         downSteps / (points.length - 1) >= 0.75 &&
         maxOffset <= 0.02 + 0.08 * chord &&
         wobble <= 0.006 + 0.02 * chord;
+  }
+
+  static double _distance(TrackPoint a, TrackPoint b) => sqrt(pow(b.x - a.x, 2) + pow(b.y - a.y, 2));
+
+  /// Largest distance of `points[from..to]` from the straight line between the two ends.
+  static double _maxOffset(List<TrackPoint> points, int from, int to) {
+    final a = points[from];
+    final chordX = points[to].x - a.x;
+    final chordY = points[to].y - a.y;
+    final chord = sqrt(chordX * chordX + chordY * chordY);
+    if (chord == 0) return 0;
+    var result = 0.0;
+    for (var i = from + 1; i < to; i++) {
+      result = max(result, ((points[i].x - a.x) * chordY - (points[i].y - a.y) * chordX).abs() / chord);
+    }
+    return result;
   }
 
   /// Mean squared error of the best fit of the path by a gentle curve, or by

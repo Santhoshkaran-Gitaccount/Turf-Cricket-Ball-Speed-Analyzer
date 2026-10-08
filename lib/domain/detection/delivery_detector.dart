@@ -13,7 +13,7 @@ export 'delivery_tracker.dart'
         DeliveryInvalid,
         TrackDiscarded,
         CameraSteadinessChanged;
-export 'frame.dart' show LumaFrame;
+export 'frame.dart' show ChromaPlanes, LumaFrame;
 
 /// Detects deliveries from a stream of camera frames with no manual input.
 class DeliveryDetector {

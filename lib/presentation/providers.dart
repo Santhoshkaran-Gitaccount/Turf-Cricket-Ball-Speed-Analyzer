@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/device_motion.dart';
 import '../data/repositories/in_memory_session_repository.dart';
+import '../data/sound_player.dart';
 import '../domain/repositories/session_repository.dart';
 import '../domain/usecases/session_usecases.dart';
 
@@ -32,6 +33,13 @@ final deviceMotionProvider = Provider.autoDispose<DeviceMotion>((ref) {
   final motion = DeviceMotion();
   ref.onDispose(motion.dispose);
   return motion;
+});
+
+/// Beeps and spoken results on the camera screen.
+final soundPlayerProvider = Provider.autoDispose<SoundPlayer>((ref) {
+  final sound = SoundPlayer()..warmUp();
+  ref.onDispose(sound.dispose);
+  return sound;
 });
 
 final ballModelProvider = FutureProvider<Uint8List?>((ref) async {
