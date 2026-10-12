@@ -12,7 +12,7 @@ void main() {
     final rows = Float32List.fromList([
       0.5, 0.3, 0.01, 0.01, 0.9, // ball above the bowling end: kept
       0.5, 0.3, 0.01, 0.01, 0.3, // low confidence: dropped
-      0.05, 0.9, 0.01, 0.01, 0.95, // off the pitch at the side: dropped
+      0.02, 0.4, 0.01, 0.01, 0.95, // well off the pitch at the side: dropped
     ]);
 
     final blobs = TfliteBallDetector.parseDetections(rows, layout);

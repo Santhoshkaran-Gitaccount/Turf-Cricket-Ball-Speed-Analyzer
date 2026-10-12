@@ -45,11 +45,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
   /// are measurement noise.
   static const _minFps = 55;
 
-  /// Below this the screen says the frame rate has dropped. Timing is fitted
-  /// over the whole flight, so speeds stay close at lower rates too; the line
-  /// only tells the user, it is not a fault.
-  static const _warnBelowFps = 45;
-
   /// While waiting for a delivery, exposure is unlocked this often so it
   /// follows the light (sun, clouds, floodlights), then locked again.
   static const _remeterInterval = Duration(seconds: 8);
@@ -92,6 +87,8 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     // The phone sits untouched on a tripod; a screen timeout would close the
     // camera and stop tracking mid-session.
     WakelockPlus.enable();
+    // The stumps tapped last time, for a phone left in the same place.
+    _controller.restoreSavedPitch();
     _initCamera();
   }
 
@@ -553,16 +550,6 @@ class _CameraScreenState extends ConsumerState<CameraScreen> with WidgetsBinding
     if (isTracking && !tracking.pitchVisible) return 'Pitch not fully visible. Check the camera view.';
     if (isTracking && !tracking.cameraSteady) return 'Camera is moving. Keep the phone still on a tripod.';
     if (tracking.notice case final message?) return message;
-    final fps = tracking.measuredFps;
-    if (isTracking && fps != null && fps < _warnBelowFps) {
-      // Against what the camera delivered when it was opened, so a drop
-      // (dimmer light, a busy phone) is told apart from a camera that only
-      // ever runs this fast.
-      final now = fps.round();
-      final usual = _requestedFps;
-      if (usual != null && usual - now >= 3) return 'Camera running at $now FPS (down from $usual)';
-      return 'Camera running at $now FPS';
-    }
     return null;
   }
 

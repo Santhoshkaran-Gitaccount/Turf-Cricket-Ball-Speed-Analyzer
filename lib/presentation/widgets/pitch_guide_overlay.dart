@@ -61,6 +61,32 @@ class _PitchGuidePainter extends CustomPainter {
     }
 
     final g = geometry;
+
+    // The whole region watched for the ball, wider and taller than the pitch,
+    // with the release box at the bowler's end where a delivery must start.
+    final border = Paint()
+      ..color = color.withValues(alpha: 0.7)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+    const steps = 24;
+    final ys = [for (var i = 0; i <= steps; i++) g.releaseTopY + (g.watchedBottomY - g.releaseTopY) * i / steps];
+    canvas.drawPath(
+      Path()
+        ..addPolygon([
+          for (final y in ys) at(g.centerXAt(y) - g.watchedHalfWidthAt(y), y),
+          for (final y in ys.reversed) at(g.centerXAt(y) + g.watchedHalfWidthAt(y), y),
+        ], true),
+      border,
+    );
+    final releaseCenter = g.centerXAt(g.releaseBottomY);
+    canvas.drawRect(
+      Rect.fromPoints(
+        at(releaseCenter - g.releaseHalfWidth, g.releaseTopY),
+        at(releaseCenter + g.releaseHalfWidth, g.releaseBottomY),
+      ),
+      Paint()..color = color.withValues(alpha: 0.10),
+    );
+
     final corners = [
       at(g.nearCenterX - g.nearHalfWidth, g.nearY),
       at(g.farCenterX - g.farHalfWidth, g.farY),

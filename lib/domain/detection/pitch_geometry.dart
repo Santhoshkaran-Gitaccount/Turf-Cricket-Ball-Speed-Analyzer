@@ -31,7 +31,8 @@ class PitchGeometry {
     farHalfWidth: 0.03,
     nearHalfWidth: 0.30,
     releaseTopY: 0.10,
-    releaseHalfWidth: 0.08,
+    // Wide enough for a bowler going round the wicket or wide of the crease.
+    releaseHalfWidth: 0.16,
     batsmanZoneTopY: 0.47,
     farCenterX: 0.5,
     nearCenterX: 0.5,
@@ -110,7 +111,7 @@ class PitchGeometry {
   /// How much larger than [standard] the pitch appears.
   final double scale;
 
-  double get releaseBottomY => farY + 0.05 * scale;
+  double get releaseBottomY => farY + 0.07 * scale;
 
   /// A ball bowled leaves the hand about 2 m up, nearly three times the
   /// height of the stumps, so seen at the bowler's end it rises above this
@@ -138,15 +139,28 @@ class PitchGeometry {
   /// looks narrow, so a ball going wide there would leave the outline. The
   /// watched width therefore reaches the full width of the batting end by
   /// [batsmanZoneTopY].
+  ///
+  /// It reaches twice as far either side as the pitch does, so a ball going
+  /// well wide, or a pitch tapped a little off, is still seen.
   bool isWatched(double x, double y) {
     if (y < releaseTopY) return isAboveReleaseZone(x, y);
-    if (y > nearY + 0.05 * scale) return false;
-    if (y < farY) return (x - centerXAt(y)).abs() <= releaseHalfWidth;
-    final towardBatsman = ((y - farY) / (batsmanZoneTopY - farY)).clamp(0.0, 1.0);
-    final airHalfWidth = releaseHalfWidth + (nearHalfWidth * 1.2 - releaseHalfWidth) * towardBatsman;
-    final half = max(airHalfWidth, halfWidthAt(y) * 1.2);
-    return (x - centerXAt(y)).abs() <= half;
+    if (y > watchedBottomY) return false;
+    return (x - centerXAt(y)).abs() <= watchedHalfWidthAt(y);
   }
+
+  /// Lowest point on screen watched for the ball, just below the batting stumps.
+  double get watchedBottomY => nearY + 0.12 * scale;
+
+  /// Half the width of the watched region at height [y], from the top of the
+  /// release corridor down to [watchedBottomY].
+  double watchedHalfWidthAt(double y) {
+    if (y < farY) return releaseHalfWidth;
+    final towardBatsman = ((y - farY) / (batsmanZoneTopY - farY)).clamp(0.0, 1.0);
+    final airHalfWidth = releaseHalfWidth + (nearHalfWidth * _watchedWidening - releaseHalfWidth) * towardBatsman;
+    return max(airHalfWidth, halfWidthAt(y) * _watchedWidening);
+  }
+
+  static const _watchedWidening = 2.0;
 
   bool isReleaseZone(double x, double y) =>
       y >= releaseTopY && y <= releaseBottomY && (x - centerXAt(y)).abs() <= releaseHalfWidth;

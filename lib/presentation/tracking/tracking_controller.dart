@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/formatters.dart';
 import '../../data/detection/detection_worker.dart';
 import '../../data/field_log.dart';
+import '../../data/pitch_setup_store.dart';
 import '../../domain/detection/delivery_detector.dart';
 import '../../domain/detection/pitch_geometry.dart';
 import '../../domain/entities/delivery.dart';
@@ -171,6 +172,7 @@ class TrackingController extends Notifier<TrackingState> {
           return;
         }
         _worker?.setGeometry(pitch);
+        unawaited(PitchSetupStore.save(state.battingTap!, (x, y)));
         _log('pitch set: batting stumps base y ${pitch.nearY.toStringAsFixed(3)}, '
             'bowling stumps base y ${pitch.farY.toStringAsFixed(3)}, scale ${pitch.scale.toStringAsFixed(2)}');
         state = state.copyWith(pitch: pitch, battingTap: null);
@@ -184,6 +186,20 @@ class TrackingController extends Notifier<TrackingState> {
     if (state.status == TrackingStatus.tracking) return;
     _worker?.setGeometry(PitchGeometry.standard);
     state = state.copyWith(pitch: null, battingTap: null);
+    unawaited(PitchSetupStore.forget());
+  }
+
+  /// Uses the stumps tapped last time, if any, so a phone left in the same
+  /// place needs no setup. Reset taps them again.
+  Future<void> restoreSavedPitch() async {
+    final saved = await PitchSetupStore.load();
+    if (saved == null || !ref.mounted || state.pitch != null || state.battingTap != null) return;
+    final (batting, bowling) = saved;
+    final pitch = PitchGeometry.fromStumps(batting: batting, bowling: bowling);
+    if (pitch == null) return;
+    _worker?.setGeometry(pitch);
+    state = state.copyWith(pitch: pitch);
+    _log('pitch restored from the last setup');
   }
 
   void savePending() {
